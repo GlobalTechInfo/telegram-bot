@@ -7,22 +7,22 @@
   "repository": "https://github.com/GlobalTechInfo/TELEGRAM-AI",
   "stack": "container",
   "env": {
-    "OWNER_ID": {
-      "description": "User Id",
+    "OWNER_ID": {5847828234
+      "description": "5847828234",
       "required": false,
       "value": ""
     },
-    "BOT_TOKEN": {
+    "BOT_TOKEN": {7343638705:AAHsRee-86CuF604GHR3n9fb0ay0ujwtCZQ
       "description": "Telegram Bot Token",
       "required": true,
       "value": ""
     },
-    "DATABASE_URL": {
+    "DATABASE_URL": {https://files.catbox.moe/svxp8v.mp4
       "description": "your mongodb database url",
       "required": false,
       "value": ""
     },
-    "PREFIX": {
+    "PREFIX": {/
       "description": "put any one symbol here except @ and + , leave it Blank if you want to use multiple prefix",
       "required": false,
       "value": ""
