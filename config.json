@@ -30,6 +30,7 @@
     "tw": { "enabled": true, "description": "Download Twitter/X posts" },
     "bing": { "enabled": true, "description": "Search the web or find images" },
     "search": { "enabled": true, "description": "Search Pinterest, web, images and more" },
+    "textmaker": { "enabled": true, "description": "Create text art and typography" },
     "admin": { "enabled": true, "description": "Admin panel (admins only)" }
   },
   "adminIds": [],
@@ -63,6 +64,7 @@
         { "label": "Snapchat", "icon": "👻", "action": "sc" },
         { "label": "Twitter", "icon": "🐦", "action": "tw" },
         { "label": "Search", "icon": "🔍", "action": "search" },
+        { "label": "Text Maker", "icon": "🎨", "action": "textmaker" },
         { "label": "About", "icon": "ℹ️", "action": "about" }
       ]
     },

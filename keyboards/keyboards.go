@@ -341,6 +341,17 @@ func ImgurSearchCountPicker(lang string) tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
+func TextMakerMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("textPro", lang), "textpro"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
 func Close(lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(

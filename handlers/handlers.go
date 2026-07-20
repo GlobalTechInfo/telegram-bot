@@ -362,6 +362,16 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.answerCb(cb.ID, "")
 		h.editMsg(chat.ID, msgID, localization.Get("searchMenu", sess.Language), keyboards.SearchMenu(sess.Language))
 
+	case data == "textmaker":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("textMakerMenu", sess.Language), keyboards.TextMakerMenu(sess.Language))
+
+	case data == "textpro":
+		h.answerCb(cb.ID, "")
+		h.store.SetState(uid, "awaiting_textpro_text")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
+
 	case data == "search_pin":
 		h.answerCb(cb.ID, "")
 		h.store.SetState(uid, "awaiting_pin_search_query")
@@ -660,6 +670,14 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		}
 		h.store.SetState(uid, "idle")
 		go h.fetchYtSearch(chat.ID, text, lang)
+
+	case "awaiting_textpro_text":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("textProSending", lang), keyboards.Back(lang))
+		go h.fetchTextPro(chat.ID, text, lang)
 
 	case "awaiting_confirm":
 		h.store.SetState(uid, "idle")
@@ -2619,4 +2637,99 @@ func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
 	))
 
 	h.sendMsg(chatID, msg, tgbotapi.NewInlineKeyboardMarkup(rows...))
+}
+
+func (h *Handler) fetchTextPro(chatID int64, text, lang string) {
+	h.acquireDL()
+	defer h.releaseDL()
+
+	apiURL := fmt.Sprintf("%s/textpro/neonLight?apiKey=%s&text=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(text))
+
+	log.Printf("TextPro: %s", text)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("TextPro API error: %v", err)
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("TextPro read error: %v", err)
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("TextPro JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("TextPro API returned success=false")
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("TextPro no data")
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	status, _ := data["status"].(bool)
+	if !status {
+		log.Printf("TextPro data status=false")
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imageURL, _ := data["image_url"].(string)
+	if imageURL == "" {
+		log.Printf("TextPro no image_url")
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imgBody, ct, err := fetchMedia(imageURL)
+	if err != nil {
+		log.Printf("TextPro image fetch error: %v", err)
+		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+		return
+	}
+
+	ext := ".jpg"
+	if strings.Contains(ct, "png") {
+		ext = ".png"
+	} else if strings.Contains(ct, "gif") {
+		ext = ".gif"
+	} else if strings.Contains(ct, "webp") {
+		ext = ".webp"
+	}
+
+	fileName := fmt.Sprintf("textpro_%s%s", time.Now().Format("150405"), ext)
+	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
+
+	photo := tgbotapi.NewPhoto(chatID, fileBytes)
+	if _, err := h.bot.Send(photo); err != nil {
+		doc := tgbotapi.NewDocument(chatID, fileBytes)
+		if _, err := h.bot.Send(doc); err != nil {
+			log.Printf("TextPro send error: %v", err)
+			h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
+			imgBody = nil
+			runtime.GC()
+			return
+		}
+	}
+
+	imgBody = nil
+	runtime.GC()
+	h.sendMsg(chatID, localization.Get("textProSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
