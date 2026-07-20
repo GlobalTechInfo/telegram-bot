@@ -101,6 +101,7 @@ func main() {
 
 	store := session.NewStore(dbPath)
 	defer store.Close()
+	store.Cleanup()
 
 	handler := handlers.New(bot, cfg, store)
 

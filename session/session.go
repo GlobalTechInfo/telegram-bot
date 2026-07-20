@@ -210,6 +210,46 @@ func (s *Store) GetFeedbacks() []Feedback {
 	return feedbacks
 }
 
+func (s *Store) Cleanup() {
+	now := time.Now()
+	s.db.Update(func(tx *bbolt.Tx) error {
+		feedbackBucket := tx.Bucket([]byte("feedbacks"))
+		feedbackCount := feedbackBucket.Stats().KeyN
+		if feedbackCount > 500 {
+			c := feedbackBucket.Cursor()
+			toDelete := feedbackCount - 500
+			for k, _ := c.First(); k != nil && toDelete > 0; k, _ = c.First() {
+				feedbackBucket.Delete(k)
+				toDelete--
+			}
+			log.Printf("Cleaned up %d old feedbacks", feedbackCount-500)
+		}
+
+		sessionBucket := tx.Bucket([]byte("sessions"))
+		c := sessionBucket.Cursor()
+		deleted := 0
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var sess SessionData
+			if err := json.Unmarshal(v, &sess); err != nil {
+				continue
+			}
+			joined, err := time.Parse(time.RFC3339, sess.JoinedAt)
+			if err != nil {
+				continue
+			}
+			if now.Sub(joined) > 90*24*time.Hour {
+				sessionBucket.Delete(k)
+				deleted++
+			}
+		}
+		if deleted > 0 {
+			log.Printf("Cleaned up %d old sessions", deleted)
+		}
+
+		return nil
+	})
+}
+
 func itob(v int64) []byte {
 	return []byte(fmt.Sprintf("%020d", v))
 }
