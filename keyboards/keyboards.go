@@ -352,6 +352,18 @@ func TextMakerMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
+func TextProMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Neon Light", "textpro:neonLight:1"),
+			tgbotapi.NewInlineKeyboardButtonData("Pornhub Style", "textpro:pornhubStyle:2"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToTextMaker", lang), "textmaker"),
+		),
+	)
+}
+
 func Close(lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(

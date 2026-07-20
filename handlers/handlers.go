@@ -368,8 +368,19 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "textpro":
 		h.answerCb(cb.ID, "")
-		h.store.SetState(uid, "awaiting_textpro_text")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.editMsg(chat.ID, msgID, localization.Get("textProMenu", sess.Language), keyboards.TextProMenu(sess.Language))
+
+	case strings.HasPrefix(data, "textpro:"):
+		h.answerCb(cb.ID, "")
+		parts := strings.SplitN(strings.TrimPrefix(data, "textpro:"), ":", 2)
+		if len(parts) != 2 {
+			h.answerCb(cb.ID, localization.Get("error", sess.Language))
+			return
+		}
+		effect := parts[0]
+		textCount := parts[1]
+		h.store.SetState(uid, "awaiting_textpro_text1")
+		h.store.SetSessionData(uid, map[string]interface{}{"textpro_effect": effect, "textpro_count": textCount})
 		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
 
 	case data == "search_pin":
@@ -671,13 +682,34 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		h.store.SetState(uid, "idle")
 		go h.fetchYtSearch(chat.ID, text, lang)
 
-	case "awaiting_textpro_text":
+	case "awaiting_textpro_text1":
 		if text == "" {
 			return
 		}
+		sess.Data["textpro_text1"] = text
+		count, _ := sess.Data["textpro_count"].(string)
+		if count == "2" {
+			h.store.SetSessionData(uid, sess.Data)
+			h.store.SetState(uid, "awaiting_textpro_text2")
+			h.sendMsg(chat.ID, localization.Get("textProPrompt2", lang), keyboards.Back(lang))
+		} else {
+			h.store.SetState(uid, "idle")
+			h.sendMsg(chat.ID, localization.Get("textProSending", lang), keyboards.Back(lang))
+			effect, _ := sess.Data["textpro_effect"].(string)
+			go h.fetchTextPro(chat.ID, effect, text, "", lang)
+		}
+
+	case "awaiting_textpro_text2":
+		if text == "" {
+			return
+		}
+		sess.Data["textpro_text2"] = text
 		h.store.SetState(uid, "idle")
 		h.sendMsg(chat.ID, localization.Get("textProSending", lang), keyboards.Back(lang))
-		go h.fetchTextPro(chat.ID, text, lang)
+		sess = h.store.GetOrCreate(uid)
+		effect, _ := sess.Data["textpro_effect"].(string)
+		text1, _ := sess.Data["textpro_text1"].(string)
+		go h.fetchTextPro(chat.ID, effect, text1, text, lang)
 
 	case "awaiting_confirm":
 		h.store.SetState(uid, "idle")
@@ -2639,14 +2671,20 @@ func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
 	h.sendMsg(chatID, msg, tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
-func (h *Handler) fetchTextPro(chatID int64, text, lang string) {
+func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("%s/textpro/neonLight?apiKey=%s&text=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(text))
+	var apiURL string
+	if text2 == "" {
+		apiURL = fmt.Sprintf("%s/textpro/%s?apiKey=%s&text=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1))
+	} else {
+		apiURL = fmt.Sprintf("%s/textpro/%s?apiKey=%s&text1=%s&text2=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1), url.QueryEscape(text2))
+	}
 
-	log.Printf("TextPro: %s", text)
+	log.Printf("TextPro: effect=%s text1=%s text2=%s", effect, text1, text2)
 
 	resp, err := http.Get(apiURL)
 	if err != nil {
