@@ -7,7 +7,7 @@ type langMap map[string]string
 var strings = map[string]langMap{
 	"en": {
 		"welcome":          "Welcome to %s!\n\nI am a modern Telegram bot with inline menus, customizable settings, and more. Use the buttons below to get started.\n\n👑 Owner: %s",
-		"help":             "Here are the things I can do:\n\n/start - Show main menu\n/help - This help message\n/settings - Customize your experience\n/profile - View your profile\n/feedback - Send us feedback\n/about - Learn about this bot\n/poll - Create a quick poll\n/tiktok - Download TikTok videos\n/fb - Download Facebook videos\n/pin - Download Pinterest videos\n/sc - Download Snapchat stories/spotlight\n/tw - Download Twitter/X posts\n/bing - Search the web or find images",
+		"help":             "Here are the things I can do:\n\n/start - Show main menu\n/help - This help message\n/settings - Customize your experience\n/profile - View your profile\n/feedback - Send us feedback\n/about - Learn about this bot\n/poll - Create a quick poll\n/yt - Download YouTube videos\n/ig - Download Instagram posts\n/tt - Download TikTok videos\n/fb - Download Facebook videos\n/pin - Download Pinterest videos\n/sc - Download Snapchat stories/spotlight\n/tw - Download Twitter/X posts\n/bing - Search the web or find images\n/search - Pinterest, stickers, imgur, YouTube search\n/textmaker - TextPro, Photooxy, Ephoto360 effects\n/admin - Admin panel (admins only)",
 		"mainMenu":         "Main Menu",
 		"settings":         "⚙️ Settings\n\nCustomize your experience:",
 		"languageChanged":  "Language changed to %s.",
