@@ -830,8 +830,8 @@ func (h *Handler) downloadAndSend(chatID int64, uid int64, videoURL, format, lan
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/loaderto/download?apiKey=qasim-dev&format=%s&url=%s",
-		url.QueryEscape(format), url.QueryEscape(videoURL))
+	apiURL := fmt.Sprintf("%s/loaderto/download?apiKey=%s&format=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(format), url.QueryEscape(videoURL))
 
 	log.Printf("YT download: format=%s url=%s", format, videoURL)
 
@@ -938,8 +938,8 @@ func (h *Handler) downloadInstagram(chatID int64, mediaURL, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/instagram/download?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(mediaURL))
+	apiURL := fmt.Sprintf("%s/instagram/download?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
 
 	log.Printf("IG download: %s", mediaURL)
 
@@ -996,8 +996,8 @@ func (h *Handler) downloadInstagram(chatID int64, mediaURL, lang string) {
 }
 
 func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/tiktok/download?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(videoURL))
+	apiURL := fmt.Sprintf("%s/tiktok/download?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
 
 	log.Printf("TT info: %s", videoURL)
 
@@ -1233,8 +1233,8 @@ func (h *Handler) downloadTikTok(chatID int64, data map[string]interface{}, form
 }
 
 func (h *Handler) fetchFbInfo(chatID int64, uid int64, videoURL, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/fbdown/download?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(videoURL))
+	apiURL := fmt.Sprintf("%s/fbdown/download?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
 
 	log.Printf("FB info: %s", videoURL)
 
@@ -1384,8 +1384,8 @@ func (h *Handler) downloadPinterest(chatID int64, mediaURL, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/download/pinterest?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(mediaURL))
+	apiURL := fmt.Sprintf("%s/download/pinterest?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
 
 	log.Printf("Pinterest download: %s", mediaURL)
 
@@ -1487,8 +1487,8 @@ func (h *Handler) downloadPinterest(chatID int64, mediaURL, lang string) {
 }
 
 func (h *Handler) fetchSnapInfo(chatID int64, uid int64, mediaURL, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/download/snapchat?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(mediaURL))
+	apiURL := fmt.Sprintf("%s/download/snapchat?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
 
 	log.Printf("Snapchat info: %s", mediaURL)
 
@@ -1717,8 +1717,8 @@ func buildTwitterCaption(data map[string]interface{}) string {
 }
 
 func (h *Handler) fetchTwitterInfo(chatID int64, uid int64, tweetURL, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/twitter/download?apiKey=qasim-dev&url=%s",
-		url.QueryEscape(tweetURL))
+	apiURL := fmt.Sprintf("%s/twitter/download?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(tweetURL))
 
 	log.Printf("Twitter info: %s", tweetURL)
 
@@ -1878,8 +1878,8 @@ func (h *Handler) downloadTwitter(chatID int64, uid int64, idxStr, lang string) 
 }
 
 func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/bing/search?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/bing/search?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("Bing search: %s", query)
 
@@ -1970,8 +1970,8 @@ func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/bing/image?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/bing/image?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("Bing images: %s", query)
 
@@ -2088,8 +2088,8 @@ func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/pinterest/search?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/pinterest/search?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("Pinterest search: %s", query)
 
@@ -2199,8 +2199,8 @@ func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string)
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/stickers/search?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/stickers/search?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("Sticker search: %s", query)
 
@@ -2359,8 +2359,8 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 	h.acquireDL()
 	defer h.releaseDL()
 
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/imgur/search?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/imgur/search?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("Imgur search: %s", query)
 
@@ -2485,8 +2485,8 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 }
 
 func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
-	apiURL := fmt.Sprintf("https://api.qasimdev.dpdns.org/api/yts/searchVideos?apiKey=qasim-dev&query=%s",
-		url.QueryEscape(query))
+	apiURL := fmt.Sprintf("%s/yts/searchVideos?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
 	log.Printf("YouTube search: %s", query)
 

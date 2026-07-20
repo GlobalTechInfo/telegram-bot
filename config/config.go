@@ -86,6 +86,22 @@ type Config struct {
 	Features     Features                   `json:"features"`
 	Localization Localization               `json:"localization"`
 	UI           UI                         `json:"ui"`
+	ApiBaseURL   string                     `json:"apiBaseUrl"`
+	ApiKey       string                     `json:"apiKey"`
+}
+
+func (c *Config) EffectiveApiBaseURL() string {
+	if v := os.Getenv("API_BASE_URL"); v != "" {
+		return v
+	}
+	return c.ApiBaseURL
+}
+
+func (c *Config) EffectiveApiKey() string {
+	if v := os.Getenv("API_KEY"); v != "" {
+		return v
+	}
+	return c.ApiKey
 }
 
 func Load(path string) (*Config, error) {

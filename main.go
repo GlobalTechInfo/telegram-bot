@@ -79,6 +79,13 @@ func main() {
 		cfg.AdminIDs = []int64{}
 	}
 
+	if apiBase := getEnv(env, "API_BASE_URL"); apiBase != "" {
+		os.Setenv("API_BASE_URL", apiBase)
+	}
+	if apiKey := getEnv(env, "API_KEY"); apiKey != "" {
+		os.Setenv("API_KEY", apiKey)
+	}
+
 	dbPath := getEnv(env, "DB_PATH")
 	if dbPath == "" {
 		exe, _ := os.Executable()

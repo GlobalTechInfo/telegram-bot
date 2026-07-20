@@ -43,6 +43,8 @@
     "defaultLanguage": "en",
     "supportedLanguages": ["en", "es", "fr", "de", "hi", "ur", "sw", "ha", "yo", "zu", "am", "af", "ig"]
   },
+  "apiBaseUrl": "https://api.qasimdev.dpdns.org/api",
+  "apiKey": "qasim-dev",
   "ui": {
     "prefix": "🤖 My Modern Bot",
     "mainMenu": {
