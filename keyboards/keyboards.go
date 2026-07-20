@@ -402,3 +402,59 @@ func Close(lang string) tgbotapi.InlineKeyboardMarkup {
 		),
 	)
 }
+
+func ShortUrlMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("reurl", lang), "shorturl:reurl"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("tinycc", lang), "shorturl:tinycc"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("itsssl", lang), "shorturl:itsssl"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("cuqin", lang), "shorturl:cuqin"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("vurl", lang), "shorturl:vurl"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("tiny", lang), "shorturl:tiny"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+func NewsMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsGoogle", lang), "news:google"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsBbc", lang), "news:bbc"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsCnn", lang), "news:cnn"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsAljazeera", lang), "news:aljazeera"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsCgtn", lang), "news:cgtn"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("newsTrt", lang), "news:trt"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+func SportsMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("sportsCricket", lang), "sports:cricket"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("sportsNfl", lang), "sports:nfl"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("sportsNba", lang), "sports:nba"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("sportsCricbuzz", lang), "sports:cricbuzz"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}

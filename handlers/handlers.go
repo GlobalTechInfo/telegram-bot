@@ -38,6 +38,12 @@ func New(bot *tgbotapi.BotAPI, cfg *config.Config, store *session.Store) *Handle
 	}
 }
 
+func (h *Handler) recoverPanic() {
+	if r := recover(); r != nil {
+		log.Printf("🔥 Panic recovered: %v", r)
+	}
+}
+
 func (h *Handler) acquireDL() {
 	h.dlSem <- struct{}{}
 }
@@ -424,6 +430,83 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.store.SetState(uid, "awaiting_ephoto_text1")
 		h.store.SetSessionData(uid, map[string]interface{}{"ephoto_effect": effect, "ephoto_count": textCount})
 		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
+
+	case data == "shorturl":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("shortUrlMenu", sess.Language), keyboards.ShortUrlMenu(sess.Language))
+
+	case strings.HasPrefix(data, "shorturl:"):
+		h.answerCb(cb.ID, "")
+		service := strings.TrimPrefix(data, "shorturl:")
+		switch service {
+		case "reurl":
+			h.store.SetState(uid, "awaiting_reurl_url")
+			h.editMsg(chat.ID, msgID, localization.Get("reurlPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "tinycc":
+			h.store.SetState(uid, "awaiting_tinycc_url")
+			h.editMsg(chat.ID, msgID, localization.Get("tinyccPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "itsssl":
+			h.store.SetState(uid, "awaiting_itsssl_url")
+			h.editMsg(chat.ID, msgID, localization.Get("itssslPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "cuqin":
+			h.store.SetState(uid, "awaiting_cuqin_url")
+			h.editMsg(chat.ID, msgID, localization.Get("cuqinPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "vurl":
+			h.store.SetState(uid, "awaiting_vurl_url")
+			h.editMsg(chat.ID, msgID, localization.Get("vurlPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "tiny":
+			h.store.SetState(uid, "awaiting_tiny_url")
+			h.editMsg(chat.ID, msgID, localization.Get("tinyPrompt", sess.Language), keyboards.Back(sess.Language))
+		default:
+			h.answerCb(cb.ID, localization.Get("error", sess.Language))
+		}
+
+	case data == "news":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("newsMenu", sess.Language), keyboards.NewsMenu(sess.Language))
+
+	case strings.HasPrefix(data, "news:"):
+		h.answerCb(cb.ID, "")
+		service := strings.TrimPrefix(data, "news:")
+		switch service {
+		case "google":
+			h.store.SetState(uid, "awaiting_news_query")
+			h.editMsg(chat.ID, msgID, localization.Get("newsPrompt", sess.Language), keyboards.Back(sess.Language))
+		case "bbc":
+			h.editMsg(chat.ID, msgID, localization.Get("newsSending", sess.Language), keyboards.Back(sess.Language))
+			go h.fetchBbcNews(chat.ID, sess.Language)
+		case "cnn":
+			h.editMsg(chat.ID, msgID, localization.Get("newsSending", sess.Language), keyboards.Back(sess.Language))
+			go h.fetchCnnNews(chat.ID, sess.Language)
+		case "aljazeera":
+			h.editMsg(chat.ID, msgID, localization.Get("newsSending", sess.Language), keyboards.Back(sess.Language))
+			go h.fetchAljazeeraNews(chat.ID, sess.Language)
+		case "cgtn":
+			h.editMsg(chat.ID, msgID, localization.Get("newsSending", sess.Language), keyboards.Back(sess.Language))
+			go h.fetchCgtnNews(chat.ID, sess.Language)
+		case "trt":
+			h.editMsg(chat.ID, msgID, localization.Get("newsSending", sess.Language), keyboards.Back(sess.Language))
+			go h.fetchTrtNews(chat.ID, sess.Language)
+		}
+
+	case data == "sports":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("sportsMenu", sess.Language), keyboards.SportsMenu(sess.Language))
+
+	case strings.HasPrefix(data, "sports:"):
+		h.answerCb(cb.ID, "")
+		service := strings.TrimPrefix(data, "sports:")
+		h.editMsg(chat.ID, msgID, localization.Get("sportsSending", sess.Language), keyboards.Back(sess.Language))
+		switch service {
+		case "cricket":
+			go h.fetchCricket(chat.ID, sess.Language)
+		case "nfl":
+			go h.fetchNfl(chat.ID, sess.Language)
+		case "nba":
+			go h.fetchNba(chat.ID, sess.Language)
+		case "cricbuzz":
+			go h.fetchCricbuzz(chat.ID, sess.Language)
+		}
 
 	case data == "search_pin":
 		h.answerCb(cb.ID, "")
@@ -831,6 +914,62 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		text1, _ := sess.Data["ephoto_text1"].(string)
 		go h.fetchEphoto(chat.ID, effect, text1, text, lang)
 
+	case "awaiting_reurl_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("reurlSending", lang), keyboards.Back(lang))
+		go h.fetchReurl(chat.ID, text, lang)
+
+	case "awaiting_tinycc_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("tinyccSending", lang), keyboards.Back(lang))
+		go h.fetchTinycc(chat.ID, text, lang)
+
+	case "awaiting_itsssl_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("itssslSending", lang), keyboards.Back(lang))
+		go h.fetchItsssl(chat.ID, text, lang)
+
+	case "awaiting_cuqin_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("cuqinSending", lang), keyboards.Back(lang))
+		go h.fetchCuqin(chat.ID, text, lang)
+
+	case "awaiting_vurl_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("vurlSending", lang), keyboards.Back(lang))
+		go h.fetchVurl(chat.ID, text, lang)
+
+	case "awaiting_tiny_url":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("tinySending", lang), keyboards.Back(lang))
+		go h.fetchTiny(chat.ID, text, lang)
+
+	case "awaiting_news_query":
+		if text == "" {
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("newsSending", lang), keyboards.Back(lang))
+		go h.fetchGoogleNews(chat.ID, text, lang)
+
 	case "awaiting_confirm":
 		h.store.SetState(uid, "idle")
 		if strings.ToLower(text) == "yes" || text == "y" {
@@ -997,6 +1136,7 @@ func isValidYouTubeURL(raw string) bool {
 }
 
 func (h *Handler) downloadAndSend(chatID int64, uid int64, videoURL, format, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -1105,6 +1245,7 @@ func isValidTwitterURL(raw string) bool {
 }
 
 func (h *Handler) downloadInstagram(chatID int64, mediaURL, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -1166,6 +1307,7 @@ func (h *Handler) downloadInstagram(chatID int64, mediaURL, lang string) {
 }
 
 func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/tiktok/download?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
 
@@ -1305,6 +1447,7 @@ func toFloat64(v interface{}) (float64, bool) {
 }
 
 func (h *Handler) downloadTikTok(chatID int64, data map[string]interface{}, format, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -1403,6 +1546,7 @@ func (h *Handler) downloadTikTok(chatID int64, data map[string]interface{}, form
 }
 
 func (h *Handler) fetchFbInfo(chatID int64, uid int64, videoURL, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/fbdown/download?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
 
@@ -1551,6 +1695,7 @@ func (h *Handler) downloadFb(chatID int64, uid int64, idxStr, lang string) {
 }
 
 func (h *Handler) downloadPinterest(chatID int64, mediaURL, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -1657,6 +1802,7 @@ func (h *Handler) downloadPinterest(chatID int64, mediaURL, lang string) {
 }
 
 func (h *Handler) fetchSnapInfo(chatID int64, uid int64, mediaURL, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/download/snapchat?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
 
@@ -1718,6 +1864,7 @@ func (h *Handler) fetchSnapInfo(chatID int64, uid int64, mediaURL, lang string) 
 }
 
 func (h *Handler) downloadSnap(chatID int64, uid int64, idxStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -1887,6 +2034,7 @@ func buildTwitterCaption(data map[string]interface{}) string {
 }
 
 func (h *Handler) fetchTwitterInfo(chatID int64, uid int64, tweetURL, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/twitter/download?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(tweetURL))
 
@@ -1951,6 +2099,7 @@ func (h *Handler) fetchTwitterInfo(chatID int64, uid int64, tweetURL, lang strin
 }
 
 func (h *Handler) downloadTwitter(chatID int64, uid int64, idxStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2048,6 +2197,7 @@ func (h *Handler) downloadTwitter(chatID int64, uid int64, idxStr, lang string) 
 }
 
 func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/bing/search?apiKey=%s&query=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
@@ -2137,6 +2287,7 @@ func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
 }
 
 func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2255,6 +2406,7 @@ func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
 }
 
 func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2366,6 +2518,7 @@ func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
 }
 
 func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2526,6 +2679,7 @@ func pickStickerURL(file map[string]interface{}) string {
 }
 
 func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2655,6 +2809,7 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 }
 
 func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
+	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/yts/searchVideos?apiKey=%s&query=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
@@ -2792,6 +2947,7 @@ func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
 }
 
 func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2893,6 +3049,7 @@ func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) 
 }
 
 func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -2987,6 +3144,7 @@ func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string)
 }
 
 func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
+	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
 
@@ -3078,4 +3236,1036 @@ func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
 	imgBody = nil
 	runtime.GC()
 	h.sendMsg(chatID, localization.Get("ephotoSuccess", lang), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchReurl(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/reurl?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Reurl API error: %v", err)
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Reurl read error: %v", err)
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Reurl JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Reurl API returned success=false")
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Reurl no data")
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	res, _ := data["result"].(map[string]interface{})
+	if res == nil {
+		log.Printf("Reurl no result")
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := res["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Reurl no short_url")
+		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("reurlSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchTinycc(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/tinycc?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Tinycc API error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Tinycc read error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Tinycc JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Tinycc API returned success=false")
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Tinycc no data")
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := data["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Tinycc no short_url")
+		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("tinyccSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchItsssl(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/itsssl?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Itsssl API error: %v", err)
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Itsssl read error: %v", err)
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Itsssl JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Itsssl API returned success=false")
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Itsssl no data")
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := data["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Itsssl no short_url")
+		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("itssslSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchCuqin(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/cuqin?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Cuqin API error: %v", err)
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Cuqin read error: %v", err)
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Cuqin JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Cuqin API returned success=false")
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Cuqin no data")
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := data["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Cuqin no short_url")
+		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("cuqinSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchVurl(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/vurl?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Vurl API error: %v", err)
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Vurl read error: %v", err)
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Vurl JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Vurl API returned success=false")
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Vurl no data")
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := data["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Vurl no short_url")
+		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("vurlSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchTiny(chatID int64, longURL, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/shortener/tiny?apiKey=%s&url=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Tiny API error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Tiny read error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Tiny JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Tiny API returned success=false")
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Tiny no data")
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	shortURL, _ := data["short_url"].(string)
+	if shortURL == "" {
+		log.Printf("Tiny no short_url")
+		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	h.sendMsg(chatID, localization.Get("tinySuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchGoogleNews(chatID int64, query, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/google?apiKey=%s&query=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	articles, _ := data["articles"].([]interface{})
+	if len(articles) == 0 {
+		log.Printf("News no articles")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(articles) < count {
+		count = len(articles)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := articles[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		articleURL, _ := article["url"].(string)
+		source, _ := article["source"].(string)
+		published, _ := article["published_at"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchBbcNews(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/bbc?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("BBC News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("BBC News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("BBC News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("BBC News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("BBC News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	articles, _ := data["articles"].([]interface{})
+	if len(articles) == 0 {
+		log.Printf("BBC News no articles")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(articles) < count {
+		count = len(articles)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := articles[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		desc, _ := article["description"].(string)
+		articleURL, _ := article["url"].(string)
+		source, _ := article["source"].(string)
+		published, _ := article["published_at"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
+		if desc != "" {
+			msg += fmt.Sprintf("   _%s_\n", escapeMarkdown(truncate(desc, 100)))
+		}
+		msg += "\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchCnnNews(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/cnn?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("CNN News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("CNN News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("CNN News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("CNN News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("CNN News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	articles, _ := data["articles"].([]interface{})
+	if len(articles) == 0 {
+		log.Printf("CNN News no articles")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(articles) < count {
+		count = len(articles)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := articles[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		desc, _ := article["description"].(string)
+		articleURL, _ := article["url"].(string)
+		source, _ := article["source"].(string)
+		published, _ := article["published_at"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
+		if desc != "" {
+			msg += fmt.Sprintf("   _%s_\n", escapeMarkdown(truncate(desc, 100)))
+		}
+		msg += "\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchAljazeeraNews(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/aljazeera?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Al Jazeera News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Al Jazeera News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Al Jazeera News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Al Jazeera News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Al Jazeera News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	articles, _ := data["articles"].([]interface{})
+	if len(articles) == 0 {
+		log.Printf("Al Jazeera News no articles")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(articles) < count {
+		count = len(articles)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := articles[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		articleURL, _ := article["url"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchCgtnNews(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/cgtnWorld?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("CGTN News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("CGTN News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("CGTN News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("CGTN News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("CGTN News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	headlines, _ := data["headlines"].([]interface{})
+	if len(headlines) == 0 {
+		log.Printf("CGTN News no headlines")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(headlines) < count {
+		count = len(headlines)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := headlines[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		articleURL, _ := article["url"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchTrtNews(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/news/trtWorld?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("TRT News API error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("TRT News read error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("TRT News JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("TRT News API returned success=false")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("TRT News no data")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	headlines, _ := data["headlines"].([]interface{})
+	if len(headlines) == 0 {
+		log.Printf("TRT News no headlines")
+		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	count := 10
+	if len(headlines) < count {
+		count = len(headlines)
+	}
+
+	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	for i := 0; i < count; i++ {
+		article, _ := headlines[i].(map[string]interface{})
+		if article == nil {
+			continue
+		}
+		title, _ := article["title"].(string)
+		articleURL, _ := article["url"].(string)
+		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchCricket(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/sports/cricket?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Cricket API error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Cricket read error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Cricket JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Cricket API returned success=false")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Cricket no data")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	games, _ := data["games"].([]interface{})
+	if len(games) == 0 {
+		log.Printf("Cricket no games")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	msg := localization.Get("sportsResult", lang)
+	for _, g := range games {
+		game, _ := g.(map[string]interface{})
+		if game == nil {
+			continue
+		}
+		name, _ := game["name"].(string)
+		status, _ := game["status"].(string)
+		details, _ := game["details"].(string)
+		msg += fmt.Sprintf("▫️ *%s*\n   %s", escapeMarkdown(name), escapeMarkdown(status))
+		if details != "" {
+			msg += fmt.Sprintf("\n   `%s`", details)
+		}
+		msg += "\n\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchNfl(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/sports/nfl?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("NFL API error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("NFL read error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("NFL JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("NFL API returned success=false")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("NFL no data")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	games, _ := data["games"].([]interface{})
+	if len(games) == 0 {
+		log.Printf("NFL no games")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	msg := localization.Get("sportsResult", lang)
+	for _, g := range games {
+		game, _ := g.(map[string]interface{})
+		if game == nil {
+			continue
+		}
+		name, _ := game["name"].(string)
+		status, _ := game["status"].(string)
+		date, _ := game["date"].(string)
+		home, _ := game["home_team"].(map[string]interface{})
+		away, _ := game["away_team"].(map[string]interface{})
+
+		homeName, _ := home["name"].(string)
+		homeScore, _ := home["score"].(string)
+		homeRecord, _ := home["record"].(string)
+		awayName, _ := away["name"].(string)
+		awayScore, _ := away["score"].(string)
+		awayRecord, _ := away["record"].(string)
+
+		msg += fmt.Sprintf("▫️ *%s*\n   %s\n", escapeMarkdown(name), escapeMarkdown(status))
+		msg += fmt.Sprintf("   🏠 %s %s (%s)\n", escapeMarkdown(homeName), homeScore, escapeMarkdown(homeRecord))
+		msg += fmt.Sprintf("   🛩 %s %s (%s)\n", escapeMarkdown(awayName), awayScore, escapeMarkdown(awayRecord))
+		if date != "" {
+			msg += fmt.Sprintf("   🕐 %s\n", escapeMarkdown(date))
+		}
+		msg += "\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchNba(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/sports/nba?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("NBA API error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("NBA read error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("NBA JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("NBA API returned success=false")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("NBA no data")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	games, _ := data["games"].([]interface{})
+	if len(games) == 0 {
+		log.Printf("NBA no games")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	msg := localization.Get("sportsResult", lang)
+	for _, g := range games {
+		game, _ := g.(map[string]interface{})
+		if game == nil {
+			continue
+		}
+		name, _ := game["name"].(string)
+		status, _ := game["status"].(string)
+		date, _ := game["date"].(string)
+		home, _ := game["home_team"].(map[string]interface{})
+		away, _ := game["away_team"].(map[string]interface{})
+
+		homeName, _ := home["name"].(string)
+		homeScore, _ := home["score"].(string)
+		awayName, _ := away["name"].(string)
+		awayScore, _ := away["score"].(string)
+
+		msg += fmt.Sprintf("▫️ *%s*\n   %s\n", escapeMarkdown(name), escapeMarkdown(status))
+		msg += fmt.Sprintf("   🏠 %s %s\n", escapeMarkdown(homeName), homeScore)
+		msg += fmt.Sprintf("   🛩 %s %s\n", escapeMarkdown(awayName), awayScore)
+		if date != "" {
+			msg += fmt.Sprintf("   🕐 %s\n", escapeMarkdown(date))
+		}
+		msg += "\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchCricbuzz(chatID int64, lang string) {
+	defer h.recoverPanic()
+	apiURL := fmt.Sprintf("%s/sports/cricbuzz?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Cricbuzz API error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Cricbuzz read error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Cricbuzz JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Cricbuzz API returned success=false")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Cricbuzz no data")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	games, _ := data["games"].([]interface{})
+	if len(games) == 0 {
+		log.Printf("Cricbuzz no games")
+		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
+		return
+	}
+
+	msg := localization.Get("sportsResult", lang)
+	for _, g := range games {
+		game, _ := g.(map[string]interface{})
+		if game == nil {
+			continue
+		}
+		title, _ := game["title"].(string)
+		matchInfo, _ := game["match_info"].(string)
+		status, _ := game["status"].(string)
+		gameURL, _ := game["url"].(string)
+		team1, _ := game["team1"].(map[string]interface{})
+		team2, _ := game["team2"].(map[string]interface{})
+
+		t1Name, _ := team1["name"].(string)
+		t1Score, _ := team1["score"].(string)
+		t2Name, _ := team2["name"].(string)
+		t2Score, _ := team2["score"].(string)
+
+		msg += fmt.Sprintf("▫️ *%s*\n", escapeMarkdown(title))
+		msg += fmt.Sprintf("   🏏 %s — %s\n", escapeMarkdown(t1Name), t1Score)
+		msg += fmt.Sprintf("   🏏 %s — %s\n", escapeMarkdown(t2Name), t2Score)
+		msg += fmt.Sprintf("   📍 %s\n", escapeMarkdown(matchInfo))
+		msg += fmt.Sprintf("   ℹ️ %s\n", escapeMarkdown(status))
+		msg += fmt.Sprintf("   [🔗 Cricbuzz](%s)\n", gameURL)
+		msg += "\n"
+	}
+
+	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
 }

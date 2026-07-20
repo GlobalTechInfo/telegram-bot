@@ -68,6 +68,8 @@ States used in `sess.State`:
 | `awaiting_photooxy_text2` | from text1 (2-text effect) | Save text2 → fetchPhotooxy |
 | `awaiting_ephoto_text1` | Text Maker → Ephoto effect | Save text1 → if 2-text: await text2, else: fetchEphoto |
 | `awaiting_ephoto_text2` | from text1 (2-text effect) | Save text2 → fetchEphoto |
+| `awaiting_reurl_url` | Short URL → Reurl | Save URL → fetchReurl |
+| `awaiting_news_query` | News → Google News | Save query → fetchGoogleNews |
 
 ### Adding a New Downloader
 
@@ -201,6 +203,8 @@ All use configurable base URL and API key (`EffectiveApiBaseURL()` + `EffectiveA
 | Sticker Search | `/stickers/search?query=QUERY` | Search |
 | Imgur Search | `/imgur/search?query=QUERY` | Search |
 | YouTube Search | `/yts/searchVideos?query=QUERY` | Search |
+| Short URL (Reurl) | `/api/shortener/reurl?apiKey=KEY&url=URL` | Utility |
+| Google News | `/api/news/google?apiKey=KEY&query=QUERY` | News |
 | TextPro Effects | `/textpro/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |
 | Photooxy Effects | `/photooxy/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |
 | Ephoto360 Effects | `/ephoto/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |

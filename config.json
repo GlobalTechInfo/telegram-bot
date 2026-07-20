@@ -31,6 +31,9 @@
     "bing": { "enabled": true, "description": "Search the web or find images" },
     "search": { "enabled": true, "description": "Search Pinterest, web, images and more" },
     "textmaker": { "enabled": true, "description": "Create text art and typography" },
+    "shorturl": { "enabled": true, "description": "Shorten URLs" },
+    "news": { "enabled": true, "description": "Latest news headlines" },
+    "sports": { "enabled": true, "description": "Live sports scores" },
     "admin": { "enabled": true, "description": "Admin panel (admins only)" }
   },
   "adminIds": [],
@@ -65,6 +68,9 @@
         { "label": "Twitter", "icon": "🐦", "action": "tw" },
         { "label": "Search", "icon": "🔍", "action": "search" },
         { "label": "Text Maker", "icon": "🎨", "action": "textmaker" },
+        { "label": "Short URL", "icon": "🔗", "action": "shorturl" },
+        { "label": "News", "icon": "📰", "action": "news" },
+        { "label": "Sports", "icon": "⚽", "action": "sports" },
         { "label": "About", "icon": "ℹ️", "action": "about" }
       ]
     },
