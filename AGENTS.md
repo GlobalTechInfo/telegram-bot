@@ -69,6 +69,8 @@ States used in `sess.State`:
 | `awaiting_ephoto_text1` | Text Maker → Ephoto effect | Save text1 → if 2-text: await text2, else: fetchEphoto |
 | `awaiting_ephoto_text2` | from text1 (2-text effect) | Save text2 → fetchEphoto |
 | `awaiting_reurl_url` | Short URL → Reurl | Save URL → fetchReurl |
+| `awaiting_image_effect` | Image Effect → blur/brightness/etc | Photo upload → POST to `/sharp/EFFECT` |
+| `awaiting_artistic_effect` | Artistic Effect → pencilSketch/etc | Photo upload → POST to `/sharp/EFFECT` |
 | `awaiting_news_query` | News → Google News | Save query → fetchGoogleNews |
 
 ### Adding a New Downloader
@@ -84,8 +86,7 @@ Follow this checklist (example: "twitter"):
    - Add download function: `func (h *Handler) downloadTwitter(...)`
    - Callback data convention: `tw_fmt:TYPE` for format selection (if applicable)
 2. **`localization/localization.go`**:
-   - Add keys to English map: `twPrompt`, `twInvalid`, `twDownloading`, `twUploading`, `twSuccess`, `twError`
-   - Non-English maps will fall back to English automatically
+   - Add keys to **all 13 language maps** (`en`, `es`, `fr`, `de`, `hi`, `ur`, `sw`, `ha`, `yo`, `zu`, `am`, `af`, `ig`): `twPrompt`, `twInvalid`, `twDownloading`, `twUploading`, `twSuccess`, `twError`
 3. **`keyboards/keyboards.go`**:
    - Add format picker function if multiple formats exist
 4. **`config.json`**:
@@ -102,7 +103,7 @@ Follow the Pinterest search pattern:
    - Add count callback: `case strings.HasPrefix(data, "xxx_search:"):` → read query, launch goroutine
    - Add state: `case "awaiting_xxx_search_query":` → save query, show count picker
    - Add function: `func (h *Handler) fetchXxxSearch(...)` — call API, iterate results, send media
-2. **`localization/localization.go`**: Add prompt, count, sending, success, error keys
+2. **`localization/localization.go`**: Add prompt, count, sending, success, error keys to **all 13 language maps**
 3. **`keyboards/keyboards.go`**: Add button to `SearchMenu()`, add count picker function
 4. **`config.json`**: Add command entry if needed
 
@@ -116,7 +117,7 @@ Follow the Pinterest search pattern:
 2. **`keyboards/keyboards.go`**:
    - Add button to `TextMakerMenu()`
    - Add `XxxMenu()` with effect buttons (callback pattern: `xxx:EFFECT:TEXT_COUNT`)
-3. **`localization/localization.go`**: Add menu, sending, success, error keys
+3. **`localization/localization.go`**: Add menu, sending, success, error keys to **all 13 language maps**
 4. Reuse `textProPrompt` / `textProPrompt2` for text input prompts
 
 ### Download Function Template
@@ -154,8 +155,9 @@ func (h *Handler) downloadXxx(chatID int64, mediaURL, lang string) {
 
 ## Localization
 
-- `Get(key, lang, args...)` — falls back to English if key missing in requested language
-- Only English has all keys defined. Non-English maps can be partial.
+- `Get(key, lang, args...)` — falls back to English if key missing in requested language (defensive only)
+- **All 13 languages must have every new key defined.** Do NOT rely on English fallback.
+- When adding new features, add translations to all 13 language maps (`en`, `es`, `fr`, `de`, `hi`, `ur`, `sw`, `ha`, `yo`, `zu`, `am`, `af`, `ig`).
 - Language code must be added to `SupportedLanguages()` and `LanguageName()`.
 - Use `fmt.Sprintf` style `%s`, `%d` placeholders; pass args to `Get()`.
 
@@ -208,3 +210,5 @@ All use configurable base URL and API key (`EffectiveApiBaseURL()` + `EffectiveA
 | TextPro Effects | `/textpro/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |
 | Photooxy Effects | `/photooxy/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |
 | Ephoto360 Effects | `/ephoto/EFFECT?text=TEXT` or `text1=T1&text2=T2` | Text Effect |
+| Image Effects | `POST /sharp/EFFECT?apiKey=KEY` with `file` multipart | Image Effect (blur, brightness, contrast, etc.) |
+| Artistic Effects | `POST /sharp/EFFECT?apiKey=KEY` with `file` multipart | Artistic Effect (pencilSketch, etc.) |

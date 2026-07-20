@@ -34,7 +34,9 @@
     "shorturl": { "enabled": true, "description": "Shorten URLs" },
     "news": { "enabled": true, "description": "Latest news headlines" },
     "sports": { "enabled": true, "description": "Live sports scores" },
-    "admin": { "enabled": true, "description": "Admin panel (admins only)" }
+	"imageeffect": { "enabled": true, "description": "Apply effects to images" },
+	"artistic": { "enabled": true, "description": "Artistic effects for images" },
+	"admin": { "enabled": true, "description": "Admin panel (admins only)" }
   },
   "adminIds": [],
   "features": {
@@ -71,6 +73,8 @@
         { "label": "Short URL", "icon": "🔗", "action": "shorturl" },
         { "label": "News", "icon": "📰", "action": "news" },
         { "label": "Sports", "icon": "⚽", "action": "sports" },
+        { "label": "Image Effect", "icon": "🎨", "action": "imageeffect" },
+        { "label": "Artistic Effect", "icon": "🖌️", "action": "artistic" },
         { "label": "About", "icon": "ℹ️", "action": "about" }
       ]
     },

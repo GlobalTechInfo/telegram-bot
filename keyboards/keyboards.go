@@ -398,7 +398,46 @@ func EphotoMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 func Close(lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("close", lang), "close"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+func ImageEffectMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectBlur", lang), "imageeffect:blur"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectBrightness", lang), "imageeffect:brightness"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectContrast", lang), "imageeffect:contrast"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectInvert", lang), "imageeffect:invert"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectGrayscale", lang), "imageeffect:grayscale"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageEffectSharpen", lang), "imageeffect:sharpen"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+func ArtisticEffectMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticPencilSketch", lang), "artistic:pencilSketch"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticHdr", lang), "artistic:hdr"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticBokeh", lang), "artistic:bokeh"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticThermal", lang), "artistic:thermal"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticXray", lang), "artistic:xray"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticInfrared", lang), "artistic:infrared"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artisticAutoEnhance", lang), "artistic:autoEnhance"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
 		),
 	)
 }

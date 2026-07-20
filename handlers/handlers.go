@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -168,12 +170,8 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		h.store.SetState(uid, "awaiting_feedback")
 		h.sendMsg(chat.ID, localization.Get("feedbackPrompt", lang), keyboards.Back(lang))
 	case "about":
-		ownerDisplay := h.cfg.Owner.Name
-		if h.cfg.Owner.Username != "" {
-			ownerDisplay += " (" + h.cfg.Owner.Username + ")"
-		}
 		msg := localization.Get("about", lang, h.cfg.Bot.Name, h.cfg.Bot.Version, h.cfg.Bot.Description,
-			ownerDisplay, h.now())
+			h.cfg.Owner.Name, h.cfg.Owner.Username, h.now())
 		h.sendMsg(chat.ID, msg, keyboards.Back(lang))
 	case "poll":
 		h.store.SetState(uid, "awaiting_poll_question")
@@ -302,12 +300,8 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "about":
 		h.answerCb(cb.ID, "")
-		ownerDisplay := h.cfg.Owner.Name
-		if h.cfg.Owner.Username != "" {
-			ownerDisplay += " (" + h.cfg.Owner.Username + ")"
-		}
 		msg := localization.Get("about", sess.Language, h.cfg.Bot.Name, h.cfg.Bot.Version, h.cfg.Bot.Description,
-			ownerDisplay, h.now())
+			h.cfg.Owner.Name, h.cfg.Owner.Username, h.now())
 		h.editMsg(chat.ID, msgID, msg, keyboards.Back(sess.Language))
 
 	case data == "yt":
@@ -493,6 +487,28 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.answerCb(cb.ID, "")
 		h.editMsg(chat.ID, msgID, localization.Get("sportsMenu", sess.Language), keyboards.SportsMenu(sess.Language))
 
+	case data == "imageeffect":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("imageEffectMenu", sess.Language), keyboards.ImageEffectMenu(sess.Language))
+
+	case strings.HasPrefix(data, "imageeffect:"):
+		h.answerCb(cb.ID, "")
+		effect := strings.TrimPrefix(data, "imageeffect:")
+		h.store.SetState(uid, "awaiting_image_effect")
+		h.store.SetSessionData(uid, map[string]interface{}{"image_effect": effect})
+		h.editMsg(chat.ID, msgID, localization.Get("imageEffectPrompt", sess.Language), keyboards.Back(sess.Language))
+
+	case data == "artistic":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("artisticMenu", sess.Language), keyboards.ArtisticEffectMenu(sess.Language))
+
+	case strings.HasPrefix(data, "artistic:"):
+		h.answerCb(cb.ID, "")
+		effect := strings.TrimPrefix(data, "artistic:")
+		h.store.SetState(uid, "awaiting_artistic_effect")
+		h.store.SetSessionData(uid, map[string]interface{}{"image_effect": effect})
+		h.editMsg(chat.ID, msgID, localization.Get("artisticPrompt", sess.Language), keyboards.Back(sess.Language))
+
 	case strings.HasPrefix(data, "sports:"):
 		h.answerCb(cb.ID, "")
 		service := strings.TrimPrefix(data, "sports:")
@@ -652,18 +668,40 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 }
 
 func (h *Handler) HandleMessage(update tgbotapi.Update) {
-	if update.Message == nil || update.Message.Text == "" {
+	if update.Message == nil {
 		return
 	}
 
 	chat := update.Message.Chat
 	user := update.Message.From
-	text := update.Message.Text
 	uid := int64(chat.ID)
 
 	h.store.TrackUser(int64(user.ID), user.FirstName, user.LastName, user.UserName)
 	sess := h.store.GetOrCreate(uid)
 	lang := sess.Language
+
+	if sess.State == "awaiting_image_effect" || sess.State == "awaiting_artistic_effect" {
+		if update.Message.Photo != nil {
+			if sess.State == "awaiting_artistic_effect" {
+				h.processArtisticEffect(chat.ID, uid, update.Message.Photo, lang)
+			} else {
+				h.processImageEffect(chat.ID, uid, update.Message.Photo, lang)
+			}
+			return
+		}
+		msgKey := "imageEffectPrompt"
+		if sess.State == "awaiting_artistic_effect" {
+			msgKey = "artisticPrompt"
+		}
+		h.sendMsg(chat.ID, localization.Get(msgKey, lang), keyboards.Back(lang))
+		return
+	}
+
+	if update.Message.Text == "" {
+		return
+	}
+
+	text := update.Message.Text
 
 	switch sess.State {
 	case "awaiting_feedback":
@@ -3604,7 +3642,7 @@ func (h *Handler) fetchGoogleNews(chatID int64, query, lang string) {
 		count = len(articles)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := articles[i].(map[string]interface{})
 		if article == nil {
@@ -3673,7 +3711,7 @@ func (h *Handler) fetchBbcNews(chatID int64, lang string) {
 		count = len(articles)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := articles[i].(map[string]interface{})
 		if article == nil {
@@ -3747,7 +3785,7 @@ func (h *Handler) fetchCnnNews(chatID int64, lang string) {
 		count = len(articles)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := articles[i].(map[string]interface{})
 		if article == nil {
@@ -3821,7 +3859,7 @@ func (h *Handler) fetchAljazeeraNews(chatID int64, lang string) {
 		count = len(articles)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := articles[i].(map[string]interface{})
 		if article == nil {
@@ -3888,7 +3926,7 @@ func (h *Handler) fetchCgtnNews(chatID int64, lang string) {
 		count = len(headlines)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := headlines[i].(map[string]interface{})
 		if article == nil {
@@ -3955,7 +3993,7 @@ func (h *Handler) fetchTrtNews(chatID int64, lang string) {
 		count = len(headlines)
 	}
 
-	msg := fmt.Sprintf(localization.Get("newsResult", lang, count))
+	msg := localization.Get("newsResult", lang, count)
 	for i := 0; i < count; i++ {
 		article, _ := headlines[i].(map[string]interface{})
 		if article == nil {
@@ -4268,4 +4306,157 @@ func (h *Handler) fetchCricbuzz(chatID int64, lang string) {
 	}
 
 	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) processImageEffect(chatID int64, uid int64, photos []tgbotapi.PhotoSize, lang string) {
+	sess := h.store.GetOrCreate(uid)
+	effect, _ := sess.Data["image_effect"].(string)
+	if effect == "" {
+		effect = "blur"
+	}
+
+	h.store.SetState(uid, "idle")
+	h.store.SetSessionData(uid, nil)
+
+	h.sendMsg(chatID, localization.Get("imageEffectProcessing", lang), keyboards.Back(lang))
+
+	largest := photos[len(photos)-1]
+	file, err := h.bot.GetFile(tgbotapi.FileConfig{FileID: largest.FileID})
+	if err != nil {
+		log.Printf("ImageEffect GetFile error: %v", err)
+		h.sendMsg(chatID, localization.Get("imageEffectError", lang), keyboards.Back(lang))
+		return
+	}
+
+	go h.fetchImageEffect(chatID, effect, file, lang, "imageEffectError", "imageEffectSuccess")
+}
+
+func (h *Handler) processArtisticEffect(chatID int64, uid int64, photos []tgbotapi.PhotoSize, lang string) {
+	sess := h.store.GetOrCreate(uid)
+	effect, _ := sess.Data["image_effect"].(string)
+	if effect == "" {
+		effect = "pencilSketch"
+	}
+
+	h.store.SetState(uid, "idle")
+	h.store.SetSessionData(uid, nil)
+
+	h.sendMsg(chatID, localization.Get("artisticProcessing", lang), keyboards.Back(lang))
+
+	largest := photos[len(photos)-1]
+	file, err := h.bot.GetFile(tgbotapi.FileConfig{FileID: largest.FileID})
+	if err != nil {
+		log.Printf("ArtisticEffect GetFile error: %v", err)
+		h.sendMsg(chatID, localization.Get("artisticError", lang), keyboards.Back(lang))
+		return
+	}
+
+	go h.fetchImageEffect(chatID, effect, file, lang, "artisticError", "artisticSuccess")
+}
+
+func (h *Handler) fetchImageEffect(chatID int64, effect string, file tgbotapi.File, lang, errKey, okKey string) {
+	defer h.recoverPanic()
+	h.acquireDL()
+	defer h.releaseDL()
+
+	apiURL := fmt.Sprintf("%s/sharp/%s?apiKey=%s",
+		h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey())
+
+	fileURL := file.Link(h.bot.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		log.Printf("ImageEffect download error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+	imgBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		log.Printf("ImageEffect read error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("file", "image.jpg")
+	if err != nil {
+		log.Printf("ImageEffect form error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+	fw.Write(imgBytes)
+	imgBytes = nil
+	w.Close()
+
+	req, err := http.NewRequest("POST", apiURL, &buf)
+	if err != nil {
+		log.Printf("ImageEffect req error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	client := &http.Client{}
+	resp2, err := client.Do(req)
+	if err != nil {
+		log.Printf("ImageEffect API error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+	defer resp2.Body.Close()
+
+	body, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		log.Printf("ImageEffect read error: %v", err)
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+
+	ct := resp2.Header.Get("Content-Type")
+
+	if strings.Contains(ct, "image/") {
+		ext := ".jpg"
+		if strings.Contains(ct, "png") {
+			ext = ".png"
+		} else if strings.Contains(ct, "gif") {
+			ext = ".gif"
+		} else if strings.Contains(ct, "webp") {
+			ext = ".webp"
+		}
+
+		fileName := fmt.Sprintf("%s_%s%s", effect, time.Now().Format("150405"), ext)
+		fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: body}
+
+		photo := tgbotapi.NewPhoto(chatID, fileBytes)
+		if _, err := h.bot.Send(photo); err != nil {
+			doc := tgbotapi.NewDocument(chatID, fileBytes)
+			if _, err := h.bot.Send(doc); err != nil {
+				log.Printf("ImageEffect send error: %v", err)
+				h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+				body = nil
+				runtime.GC()
+				return
+			}
+		}
+
+		body = nil
+		runtime.GC()
+		h.sendMsg(chatID, localization.Get(okKey, lang), keyboards.MainMenu(h.cfg, lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("ImageEffect bad response: %s", string(body))
+		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
+		return
+	}
+
+	errMsg, _ := result["error"].(string)
+	if errMsg == "" {
+		errMsg = "Unknown error"
+	}
+	log.Printf("ImageEffect API error: %s", errMsg)
+	h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
 }
