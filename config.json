@@ -1,0 +1,78 @@
+{
+  "bot": {
+    "name": "My Modern Bot",
+    "username": "MyModernBot",
+    "description": "A modern, feature-rich Telegram bot with inline menus, customizable settings, and more.",
+    "version": "1.0.0",
+    "photo": "https://i.ibb.co/5Wc1R5D0/1784490428744.png",
+    "startupMessage": ""
+  },
+  "owner": {
+    "name": "Bot Owner",
+    "username": "@owner",
+    "id": 0
+  },
+  "timezone": "Asia/Karachi",
+  "commands": {
+    "start": { "enabled": true, "description": "Start the bot and show main menu" },
+    "help": { "enabled": true, "description": "Show help information" },
+    "settings": { "enabled": true, "description": "Configure your preferences" },
+    "profile": { "enabled": true, "description": "View your profile" },
+    "feedback": { "enabled": true, "description": "Send feedback to the developers" },
+    "about": { "enabled": true, "description": "About this bot" },
+    "poll": { "enabled": true, "description": "Create a quick poll" },
+    "yt": { "enabled": true, "description": "Download YouTube videos" },
+    "ig": { "enabled": true, "description": "Download Instagram posts" },
+    "tt": { "enabled": true, "description": "Download TikTok videos" },
+    "fb": { "enabled": true, "description": "Download Facebook videos" },
+    "pin": { "enabled": true, "description": "Download Pinterest videos" },
+    "sc": { "enabled": true, "description": "Download Snapchat stories/spotlight" },
+    "tw": { "enabled": true, "description": "Download Twitter/X posts" },
+    "bing": { "enabled": true, "description": "Search the web or find images" },
+    "search": { "enabled": true, "description": "Search Pinterest, web, images and more" },
+    "admin": { "enabled": true, "description": "Admin panel (admins only)" }
+  },
+  "adminIds": [],
+  "features": {
+    "inlineMode": true,
+    "userTracking": true,
+    "feedbackSystem": true,
+    "polls": true
+  },
+  "localization": {
+    "defaultLanguage": "en",
+    "supportedLanguages": ["en", "es", "fr", "de", "hi", "ur", "sw", "ha", "yo", "zu", "am", "af", "ig"]
+  },
+  "ui": {
+    "prefix": "🤖 My Modern Bot",
+    "mainMenu": {
+      "cols": 2,
+      "buttons": [
+        { "label": "Help", "icon": "❓", "action": "help" },
+        { "label": "Profile", "icon": "👤", "action": "profile" },
+        { "label": "Settings", "icon": "⚙️", "action": "settings" },
+        { "label": "Feedback", "icon": "💬", "action": "feedback" },
+        { "label": "Poll", "icon": "📊", "action": "poll" },
+        { "label": "YouTube", "icon": "📥", "action": "yt" },
+        { "label": "Instagram", "icon": "📸", "action": "ig" },
+        { "label": "TikTok", "icon": "📱", "action": "tt" },
+        { "label": "Facebook", "icon": "📘", "action": "fb" },
+        { "label": "Pinterest", "icon": "📌", "action": "pin" },
+        { "label": "Snapchat", "icon": "👻", "action": "sc" },
+        { "label": "Twitter", "icon": "🐦", "action": "tw" },
+        { "label": "Search", "icon": "🔍", "action": "search" },
+        { "label": "About", "icon": "ℹ️", "action": "about" }
+      ]
+    },
+    "confirmButtons": {
+      "yesLabel": "✅ Yes",
+      "noLabel": "❌ No",
+      "yesAction": "confirm_yes",
+      "noAction": "confirm_no"
+    },
+    "theme": {
+      "primaryEmoji": "🤖",
+      "separator": "─"
+    }
+  }
+}

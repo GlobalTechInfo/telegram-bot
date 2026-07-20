@@ -1,0 +1,5 @@
+telegram-bot
+bot.db
+.env
+bot-data/
+*.log
