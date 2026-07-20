@@ -212,7 +212,15 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		}
 		totalUsers, totalFeedback := h.store.GetStats()
 		msg := localization.Get("adminPanel", lang, totalUsers, totalFeedback)
-		h.sendMsg(chat.ID, msg, keyboards.Back(lang))
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(localization.Get("viewFeedback", lang), "admin_feedback"),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+			),
+		)
+		h.sendMsg(chat.ID, msg, kb)
 	default:
 		h.sendMsg(chat.ID, localization.Get("unknownCommand", lang), keyboards.Back(lang))
 	}
@@ -534,6 +542,26 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		if _, err := h.bot.Request(del); err != nil {
 			log.Printf("delete error: %v", err)
 		}
+
+	case data == "admin_feedback":
+		h.answerCb(cb.ID, "")
+		feedbacks := h.store.GetFeedbacks()
+		if len(feedbacks) == 0 {
+			h.editMsg(chat.ID, msgID, localization.Get("adminFeedback", sess.Language, "No feedback yet."), keyboards.Back(sess.Language))
+			return
+		}
+		var lines []string
+		maxShow := 10
+		if len(feedbacks) < maxShow {
+			maxShow = len(feedbacks)
+		}
+		for i := 0; i < maxShow; i++ {
+			f := feedbacks[i]
+			lines = append(lines, fmt.Sprintf("👤 ID: %d\n💬 %s\n🕐 %s",
+				f.UserID, escapeMarkdown(f.Message), f.Timestamp))
+		}
+		text := strings.Join(lines, "\n\n")
+		h.editMsg(chat.ID, msgID, localization.Get("adminFeedback", sess.Language, text), keyboards.Back(sess.Language))
 
 	default:
 		h.answerCb(cb.ID, localization.Get("error", sess.Language))

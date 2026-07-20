@@ -193,6 +193,23 @@ func (s *Store) GetStats() (users, feedbacks int) {
 	return
 }
 
+func (s *Store) GetFeedbacks() []Feedback {
+	var feedbacks []Feedback
+	s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("feedbacks"))
+		c := b.Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var f Feedback
+			if err := json.Unmarshal(v, &f); err != nil {
+				continue
+			}
+			feedbacks = append(feedbacks, f)
+		}
+		return nil
+	})
+	return feedbacks
+}
+
 func itob(v int64) []byte {
 	return []byte(fmt.Sprintf("%020d", v))
 }

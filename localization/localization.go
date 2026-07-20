@@ -19,6 +19,8 @@ var strings = map[string]langMap{
 		"pollOptions":      "Send me the options, one per line (min 2, max 10):",
 		"pollCreated":      "✅ Poll created!",
 		"adminPanel":       "🔐 Admin Panel\n\nTotal users: %d\nTotal feedback: %d",
+		"viewFeedback":     "📋 View Feedback",
+		"adminFeedback":    "📋 Recent Feedback\n\n%s",
 		"noPermission":     "⛔ You do not have permission to use this command.",
 		"unknownCommand":   "Unknown command. Use /help to see available commands.",
 		"backToMenu":       "« Back to Main Menu",
