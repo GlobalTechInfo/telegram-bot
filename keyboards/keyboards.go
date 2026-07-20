@@ -345,6 +345,8 @@ func TextMakerMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("textPro", lang), "textpro"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("photooxy", lang), "photooxy"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ephoto", lang), "ephoto"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
@@ -356,7 +358,36 @@ func TextProMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Neon Light", "textpro:neonLight:1"),
+			tgbotapi.NewInlineKeyboardButtonData("Avengers Logo", "textpro:avengersLogo:2"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Pornhub Style", "textpro:pornhubStyle:2"),
+			tgbotapi.NewInlineKeyboardButtonData("Harry Potter", "textpro:harryPotter:1"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToTextMaker", lang), "textmaker"),
+		),
+	)
+}
+
+func PhotooxyMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Battle 4", "photooxy:battle4:2"),
+			tgbotapi.NewInlineKeyboardButtonData("TikTok", "photooxy:tiktok:2"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToTextMaker", lang), "textmaker"),
+		),
+	)
+}
+
+func EphotoMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Wolf Galaxy", "ephoto:wolfGalaxy:2"),
+			tgbotapi.NewInlineKeyboardButtonData("Free Fire", "ephoto:freeFireBanner:2"),
+			tgbotapi.NewInlineKeyboardButtonData("Apex", "ephoto:apexBanner:2"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToTextMaker", lang), "textmaker"),

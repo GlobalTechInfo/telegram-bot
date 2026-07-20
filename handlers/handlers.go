@@ -383,6 +383,40 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.store.SetSessionData(uid, map[string]interface{}{"textpro_effect": effect, "textpro_count": textCount})
 		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
 
+	case data == "photooxy":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("photooxyMenu", sess.Language), keyboards.PhotooxyMenu(sess.Language))
+
+	case strings.HasPrefix(data, "photooxy:"):
+		h.answerCb(cb.ID, "")
+		parts := strings.SplitN(strings.TrimPrefix(data, "photooxy:"), ":", 2)
+		if len(parts) != 2 {
+			h.answerCb(cb.ID, localization.Get("error", sess.Language))
+			return
+		}
+		effect := parts[0]
+		textCount := parts[1]
+		h.store.SetState(uid, "awaiting_photooxy_text1")
+		h.store.SetSessionData(uid, map[string]interface{}{"photooxy_effect": effect, "photooxy_count": textCount})
+		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
+
+	case data == "ephoto":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("ephotoMenu", sess.Language), keyboards.EphotoMenu(sess.Language))
+
+	case strings.HasPrefix(data, "ephoto:"):
+		h.answerCb(cb.ID, "")
+		parts := strings.SplitN(strings.TrimPrefix(data, "ephoto:"), ":", 2)
+		if len(parts) != 2 {
+			h.answerCb(cb.ID, localization.Get("error", sess.Language))
+			return
+		}
+		effect := parts[0]
+		textCount := parts[1]
+		h.store.SetState(uid, "awaiting_ephoto_text1")
+		h.store.SetSessionData(uid, map[string]interface{}{"ephoto_effect": effect, "ephoto_count": textCount})
+		h.editMsg(chat.ID, msgID, localization.Get("textProPrompt", sess.Language), keyboards.Back(sess.Language))
+
 	case data == "search_pin":
 		h.answerCb(cb.ID, "")
 		h.store.SetState(uid, "awaiting_pin_search_query")
@@ -710,6 +744,64 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		effect, _ := sess.Data["textpro_effect"].(string)
 		text1, _ := sess.Data["textpro_text1"].(string)
 		go h.fetchTextPro(chat.ID, effect, text1, text, lang)
+
+	case "awaiting_photooxy_text1":
+		if text == "" {
+			return
+		}
+		sess.Data["photooxy_text1"] = text
+		count, _ := sess.Data["photooxy_count"].(string)
+		if count == "2" {
+			h.store.SetSessionData(uid, sess.Data)
+			h.store.SetState(uid, "awaiting_photooxy_text2")
+			h.sendMsg(chat.ID, localization.Get("textProPrompt2", lang), keyboards.Back(lang))
+		} else {
+			h.store.SetState(uid, "idle")
+			h.sendMsg(chat.ID, localization.Get("photooxySending", lang), keyboards.Back(lang))
+			effect, _ := sess.Data["photooxy_effect"].(string)
+			go h.fetchPhotooxy(chat.ID, effect, text, "", lang)
+		}
+
+	case "awaiting_photooxy_text2":
+		if text == "" {
+			return
+		}
+		sess.Data["photooxy_text2"] = text
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("photooxySending", lang), keyboards.Back(lang))
+		sess = h.store.GetOrCreate(uid)
+		effect, _ := sess.Data["photooxy_effect"].(string)
+		text1, _ := sess.Data["photooxy_text1"].(string)
+		go h.fetchPhotooxy(chat.ID, effect, text1, text, lang)
+
+	case "awaiting_ephoto_text1":
+		if text == "" {
+			return
+		}
+		sess.Data["ephoto_text1"] = text
+		count, _ := sess.Data["ephoto_count"].(string)
+		if count == "2" {
+			h.store.SetSessionData(uid, sess.Data)
+			h.store.SetState(uid, "awaiting_ephoto_text2")
+			h.sendMsg(chat.ID, localization.Get("textProPrompt2", lang), keyboards.Back(lang))
+		} else {
+			h.store.SetState(uid, "idle")
+			h.sendMsg(chat.ID, localization.Get("ephotoSending", lang), keyboards.Back(lang))
+			effect, _ := sess.Data["ephoto_effect"].(string)
+			go h.fetchEphoto(chat.ID, effect, text, "", lang)
+		}
+
+	case "awaiting_ephoto_text2":
+		if text == "" {
+			return
+		}
+		sess.Data["ephoto_text2"] = text
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("ephotoSending", lang), keyboards.Back(lang))
+		sess = h.store.GetOrCreate(uid)
+		effect, _ := sess.Data["ephoto_effect"].(string)
+		text1, _ := sess.Data["ephoto_text1"].(string)
+		go h.fetchEphoto(chat.ID, effect, text1, text, lang)
 
 	case "awaiting_confirm":
 		h.store.SetState(uid, "idle")
@@ -2770,4 +2862,192 @@ func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) 
 	imgBody = nil
 	runtime.GC()
 	h.sendMsg(chatID, localization.Get("textProSuccess", lang), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string) {
+	h.acquireDL()
+	defer h.releaseDL()
+
+	var apiURL string
+	if text2 == "" {
+		apiURL = fmt.Sprintf("%s/photooxy/%s?apiKey=%s&text=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1))
+	} else {
+		apiURL = fmt.Sprintf("%s/photooxy/%s?apiKey=%s&text1=%s&text2=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1), url.QueryEscape(text2))
+	}
+
+	log.Printf("Photooxy: effect=%s text1=%s text2=%s", effect, text1, text2)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Photooxy API error: %v", err)
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Photooxy read error: %v", err)
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Photooxy JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Photooxy API returned success=false")
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Photooxy no data")
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imageURL, _ := data["image_url"].(string)
+	if imageURL == "" {
+		log.Printf("Photooxy no image_url")
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imgBody, ct, err := fetchMedia(imageURL)
+	if err != nil {
+		log.Printf("Photooxy image fetch error: %v", err)
+		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+		return
+	}
+
+	ext := ".jpg"
+	if strings.Contains(ct, "png") {
+		ext = ".png"
+	} else if strings.Contains(ct, "gif") {
+		ext = ".gif"
+	} else if strings.Contains(ct, "webp") {
+		ext = ".webp"
+	}
+
+	fileName := fmt.Sprintf("photooxy_%s%s", time.Now().Format("150405"), ext)
+	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
+
+	photo := tgbotapi.NewPhoto(chatID, fileBytes)
+	if _, err := h.bot.Send(photo); err != nil {
+		doc := tgbotapi.NewDocument(chatID, fileBytes)
+		if _, err := h.bot.Send(doc); err != nil {
+			log.Printf("Photooxy send error: %v", err)
+			h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
+			imgBody = nil
+			runtime.GC()
+			return
+		}
+	}
+
+	imgBody = nil
+	runtime.GC()
+	h.sendMsg(chatID, localization.Get("photooxySuccess", lang), keyboards.MainMenu(h.cfg, lang))
+}
+
+func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
+	h.acquireDL()
+	defer h.releaseDL()
+
+	var apiURL string
+	if text2 == "" {
+		apiURL = fmt.Sprintf("%s/ephoto/%s?apiKey=%s&text=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1))
+	} else {
+		apiURL = fmt.Sprintf("%s/ephoto/%s?apiKey=%s&text1=%s&text2=%s",
+			h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey(), url.QueryEscape(text1), url.QueryEscape(text2))
+	}
+
+	log.Printf("Ephoto: effect=%s text1=%s text2=%s", effect, text1, text2)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Printf("Ephoto API error: %v", err)
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("Ephoto read error: %v", err)
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		log.Printf("Ephoto JSON error: %v", err)
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	success, _ := result["success"].(bool)
+	if !success {
+		log.Printf("Ephoto API returned success=false")
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	data, _ := result["data"].(map[string]interface{})
+	if data == nil {
+		log.Printf("Ephoto no data")
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imageURL, _ := data["image_url"].(string)
+	if imageURL == "" {
+		log.Printf("Ephoto no image_url")
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	imgBody, ct, err := fetchMedia(imageURL)
+	if err != nil {
+		log.Printf("Ephoto image fetch error: %v", err)
+		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+		return
+	}
+
+	ext := ".jpg"
+	if strings.Contains(ct, "png") {
+		ext = ".png"
+	} else if strings.Contains(ct, "gif") {
+		ext = ".gif"
+	} else if strings.Contains(ct, "webp") {
+		ext = ".webp"
+	}
+
+	fileName := fmt.Sprintf("ephoto_%s%s", time.Now().Format("150405"), ext)
+	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
+
+	photo := tgbotapi.NewPhoto(chatID, fileBytes)
+	if _, err := h.bot.Send(photo); err != nil {
+		doc := tgbotapi.NewDocument(chatID, fileBytes)
+		if _, err := h.bot.Send(doc); err != nil {
+			log.Printf("Ephoto send error: %v", err)
+			h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
+			imgBody = nil
+			runtime.GC()
+			return
+		}
+	}
+
+	imgBody = nil
+	runtime.GC()
+	h.sendMsg(chatID, localization.Get("ephotoSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
