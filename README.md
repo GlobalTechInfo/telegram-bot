@@ -123,6 +123,24 @@ Key fields:
 
 Message [@userinfobot](https://t.me/userinfobot) — it will reply with your ID. Add it to `adminIds` in `config.json` or `ADMIN_IDS` in `.env`.
 
+## One-Line Install
+
+Install and run in one command — the script will prompt for your BOT_TOKEN and start the bot automatically:
+
+| Platform | Command |
+|----------|---------|
+| **Linux / macOS** | `bash <(curl -sL https://raw.githubusercontent.com/GlobalTechInfo/telegram-bot/main/install.sh)` |
+| **Windows** (PowerShell as Admin) | `iwr -useb https://raw.githubusercontent.com/GlobalTechInfo/telegram-bot/main/install.ps1 \| iex` |
+| **Termux** | `pkg install curl -y && bash <(curl -sL https://raw.githubusercontent.com/GlobalTechInfo/telegram-bot/main/install.sh)` |
+
+The installer will:
+1. Install Git and Go if missing
+2. Clone the repository
+3. **Prompt for BOT_TOKEN** (and optionally ADMIN_IDS, API_URL, API_KEY)
+4. Build the binary
+5. Create a system-wide shortcut (`telegram-bot`)
+6. **Start the bot automatically**
+
 ## Deployment
 
 ### Local (Direct)
