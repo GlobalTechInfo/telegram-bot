@@ -1,5 +1,19 @@
+# build output
 telegram-bot
-bot.db
-.env
+*.exe
+
+# runtime data
+*.db
+*.db-shm
+*.db-wal
 bot-data/
+
+# secrets
+.env
+.env.local
+
+# logs
 *.log
+
+# test files are local-only, never published
+*_test.go

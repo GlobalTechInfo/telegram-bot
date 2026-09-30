@@ -497,3 +497,148 @@ func SportsMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 		),
 	)
 }
+
+func MemeMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	tmpls := []string{"drake", "buzz", "change", "distracted", "one-does-not-know", "two-buttons"}
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(tmpls)/2+1)
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+	for _, t := range tmpls {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(t, "meme:"+t))
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func TranslateLangPicker(lang string) tgbotapi.InlineKeyboardMarkup {
+	langs := []string{"en", "es", "fr", "de", "hi", "ur", "sw", "ha", "yo", "zu", "am", "af", "ig"}
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(langs)/3+1)
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 3)
+	for _, l := range langs {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(l, "tr_lang:"+l))
+		if len(row) == 3 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// DownloadMenu collects every media downloader behind one button.
+func DownloadMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytMenu", lang), "dl_yt"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("igMenu", lang), "dl_ig"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttMenu", lang), "dl_tt"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("fbMenu", lang), "dl_fb"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("pinMenu", lang), "dl_pin"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("scMenu", lang), "dl_sc"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("twMenu", lang), "dl_tw"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+// CreateMenu collects the image/text generators.
+func CreateMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("textMaker", lang), "textmaker"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("meme", lang), "meme"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("imageeffect", lang), "imageeffect"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("artistic", lang), "artistic"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+// MoreMenu holds the remaining utilities that do not fit elsewhere.
+func MoreMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("news", lang), "news"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("sports", lang), "sports"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("poll", lang), "poll"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("about", lang), "about"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+// ToolsMenu collects the utility features behind one button.
+func ToolsMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("qrMenu", lang), "tools_qr"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("weatherMenu", lang), "tools_weather"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("translateMenu", lang), "tools_translate"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("convertMenu", lang), "tools_convert"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("shortUrl", lang), "shorturl"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("remindMenu", lang), "tools_remind"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("historyMenu", lang), "tools_history"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("redditMenu", lang), "tools_reddit"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+// GroupMenu collects the group/channel admin commands.
+func GroupMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("groups", lang), "tools_groups"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("gstats", lang), "tools_gstats"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("gsettings", lang), "tools_gsettings"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("welcome", lang), "tools_welcome"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ban", lang), "tools_ban"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("kick", lang), "tools_kick"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("mute", lang), "tools_mute"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("invite", lang), "tools_invite"),
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("del", lang), "tools_del"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}

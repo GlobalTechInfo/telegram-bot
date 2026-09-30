@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,19 +26,56 @@ const maxDownloadSize = 100 << 20 // 100 MB max per download
 const maxConcurrentDownloads = 2
 
 type Handler struct {
-	bot       *tgbotapi.BotAPI
-	cfg       *config.Config
-	store     *session.Store
-	dlSem     chan struct{}
+	bot    *tgbotapi.BotAPI
+	cfg    *config.Config
+	store  *session.Store
+	dlSem  chan struct{}
+	httpc  *http.Client
+	token  string
+	selfID int64
 }
 
-func New(bot *tgbotapi.BotAPI, cfg *config.Config, store *session.Store) *Handler {
-	return &Handler{
-		bot:   bot,
-		cfg:   cfg,
-		store: store,
-		dlSem: make(chan struct{}, maxConcurrentDownloads),
+func New(bot *tgbotapi.BotAPI, cfg *config.Config, store *session.Store, token string) *Handler {
+	selfID := int64(0)
+	if u, err := bot.GetMe(); err == nil {
+		selfID = u.ID
 	}
+	return &Handler{
+		bot:    bot,
+		cfg:    cfg,
+		store:  store,
+		dlSem:  make(chan struct{}, maxConcurrentDownloads),
+		httpc:  &http.Client{Timeout: 60 * time.Second},
+		selfID: selfID,
+		token:  token,
+	}
+}
+
+var emptyKB tgbotapi.InlineKeyboardMarkup
+
+func (h *Handler) apiGet(apiURL string) ([]byte, error) {
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := h.httpc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize))
+}
+
+func (h *Handler) downloadFile(f tgbotapi.File) ([]byte, error) {
+	resp, err := h.httpc.Get(f.Link(h.token))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize))
 }
 
 func (h *Handler) recoverPanic() {
@@ -81,7 +119,9 @@ func (h *Handler) formatTime(ts string) string {
 func (h *Handler) sendMsg(chatID int64, text string, markup tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, h.p(text))
 	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = markup
+	if len(markup.InlineKeyboard) > 0 {
+		msg.ReplyMarkup = markup
+	}
 	if _, err := h.bot.Send(msg); err != nil {
 		log.Printf("sendMsg error: %v", err)
 	}
@@ -90,7 +130,9 @@ func (h *Handler) sendMsg(chatID int64, text string, markup tgbotapi.InlineKeybo
 func (h *Handler) editMsg(chatID int64, msgID int, text string, markup tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewEditMessageText(chatID, msgID, h.p(text))
 	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = &markup
+	if len(markup.InlineKeyboard) > 0 {
+		msg.ReplyMarkup = &markup
+	}
 	if _, err := h.bot.Send(msg); err != nil {
 		if strings.Contains(err.Error(), "there is no text") {
 			h.sendMsg(chatID, text, markup)
@@ -111,7 +153,9 @@ func (h *Handler) sendPhoto(chatID int64, photo string, caption string, markup t
 	msg := tgbotapi.NewPhoto(chatID, tgbotapi.FileID(photo))
 	msg.Caption = h.p(caption)
 	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = markup
+	if len(markup.InlineKeyboard) > 0 {
+		msg.ReplyMarkup = markup
+	}
 	if _, err := h.bot.Send(msg); err != nil {
 		h.sendMsg(chatID, caption, markup)
 	}
@@ -209,6 +253,89 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		h.sendMsg(chat.ID, localization.Get("bingPrompt", lang), keyboards.BingModePicker(lang))
 	case "search":
 		h.sendMsg(chat.ID, localization.Get("searchMenu", lang), keyboards.SearchMenu(lang))
+	case "qr":
+		h.store.SetState(uid, "awaiting_qr_text")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("qrPrompt", lang), keyboards.Back(lang))
+	case "weather":
+		h.store.SetState(uid, "awaiting_weather_city")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("weatherPrompt", lang), keyboards.Back(lang))
+	case "translate":
+		h.store.SetState(uid, "awaiting_translate_text")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("translatePrompt", lang), keyboards.TranslateLangPicker(lang))
+	case "convert":
+		h.store.SetState(uid, "awaiting_convert")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("convertPrompt", lang), keyboards.Back(lang))
+	case "meme":
+		h.sendMsg(chat.ID, localization.Get("memeSelectTemplate", lang), keyboards.MemeMenu(lang))
+	case "reddit":
+		h.store.SetState(uid, "awaiting_reddit_sub")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("redditPrompt", lang), keyboards.Back(lang))
+	case "remind":
+		if len(strings.Fields(update.Message.Text)) < 2 {
+			h.cmdRemind(chat, user, lang)
+			return
+		}
+		h.store.SetState(uid, "awaiting_remind")
+		h.store.SetSessionData(uid, make(map[string]interface{}))
+		h.sendMsg(chat.ID, localization.Get("remindPrompt", lang), keyboards.Back(lang))
+	case "history":
+		h.cmdHistory(chat, user, lang)
+	case "ban", "kick", "mute", "unban", "promote", "admin_add", "demote", "admin_remove":
+		switch cmd {
+		case "ban":
+			h.cmdBan(chat, user, lang)
+		case "unban":
+			h.cmdUnban(chat, user, update.Message, lang)
+		case "kick":
+			h.cmdKick(chat, user, update.Message, lang)
+		case "mute":
+			h.cmdMute(chat, user, update.Message, lang)
+		case "promote", "admin_add":
+			h.cmdPromote(chat, user, update.Message, lang)
+		case "demote", "admin_remove":
+			h.cmdDemote(chat, user, update.Message, lang)
+		}
+	case "del", "purge":
+		h.cmdDel(chat, user, lang)
+	case "invite", "link":
+		h.cmdInvite(chat, user, lang)
+	case "welcome":
+		h.cmdWelcome(chat, user, lang)
+	case "groups":
+		h.cmdGroups(user, lang)
+	case "channels":
+		h.cmdChannels(user, lang)
+	case "ginfo":
+		h.cmdGInfo(chat, user, lang, "")
+	case "gsetname":
+		h.cmdGInfo(chat, user, lang, "name")
+	case "gsetdesc":
+		h.cmdGInfo(chat, user, lang, "desc")
+	case "gsettings":
+		h.cmdGSettings(chat, user, lang, "")
+	case "lockdown":
+		h.cmdGSettings(chat, user, lang, "lockdown")
+	case "antilinks":
+		h.cmdGSettings(chat, user, lang, "antilinks")
+	case "anticaps":
+		h.cmdGSettings(chat, user, lang, "anticaps")
+	case "moderate":
+		h.cmdModerate(chat, user, lang, "")
+	case "gstats":
+		h.cmdGStats(chat, user, lang)
+	case "chsettings":
+		h.cmdChSettings(chat, user, lang)
+	case "chstats":
+		h.cmdChStats(chat, user, lang)
+	case "stream":
+		h.cmdStream(chat, user, lang)
+	case "post":
+		h.cmdPost(chat, user, lang)
 	case "admin":
 		if !h.cfg.IsAdmin(int64(user.ID)) {
 			h.sendMsg(chat.ID, localization.Get("noPermission", lang), keyboards.Back(lang))
@@ -642,6 +769,75 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 			log.Printf("delete error: %v", err)
 		}
 
+	case data == "tools_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("toolsTitle", sess.Language), keyboards.ToolsMenu(h.cfg, sess.Language))
+
+	case data == "dl_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("downloadTitle", sess.Language), keyboards.DownloadMenu(sess.Language))
+
+	case data == "create_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("createTitle", sess.Language), keyboards.CreateMenu(sess.Language))
+
+	case data == "more_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("moreTitle", sess.Language), keyboards.MoreMenu(h.cfg, sess.Language))
+
+	case data == "search_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("searchMenu", sess.Language), keyboards.SearchMenu(sess.Language))
+
+	case data == "groups_menu":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("groupsTitle", sess.Language), keyboards.GroupMenu(h.cfg, sess.Language))
+
+	case strings.HasPrefix(data, "dl_"):
+		h.answerCb(cb.ID, "")
+		cmd := strings.TrimPrefix(data, "dl_")
+		sess = h.store.GetOrCreate(uid)
+		sess.Data = make(map[string]interface{})
+		h.store.SetSessionData(uid, sess.Data)
+		h.store.SetState(uid, "awaiting_"+cmd+"_url")
+		if key, ok := downloadPromptKey(cmd); ok {
+			h.editMsg(chat.ID, msgID, localization.Get(key, sess.Language), keyboards.Back(sess.Language))
+		}
+
+	case strings.HasPrefix(data, "tools_"):
+		h.answerCb(cb.ID, "")
+		action := strings.TrimPrefix(data, "tools_")
+		if prompt := h.runToolAction(action, cb.Message.Chat, cb.From, sess.Language); prompt == "" {
+			return
+		} else if sess.State != "idle" {
+			h.editMsg(chat.ID, msgID, localization.Get(prompt, sess.Language), keyboards.Back(sess.Language))
+		}
+
+	case data == "meme:":
+		h.answerCb(cb.ID, "")
+		tmpl := strings.TrimPrefix(data, "meme:")
+		sess = h.store.GetOrCreate(uid)
+		sess.Data["meme_template"] = tmpl
+		h.store.SetSessionData(uid, sess.Data)
+		h.store.SetState(uid, "awaiting_meme_top")
+		h.editMsg(chat.ID, msgID, localization.Get("memeTopText", sess.Language), keyboards.Back(sess.Language))
+
+	case data == "tr_lang:":
+		h.answerCb(cb.ID, "")
+		target := strings.TrimPrefix(data, "tr_lang:")
+		sess = h.store.GetOrCreate(uid)
+		sess.Data["tr_target"] = target
+		h.store.SetSessionData(uid, sess.Data)
+		h.store.SetState(uid, "awaiting_translate_text")
+		h.editMsg(chat.ID, msgID, localization.Get("translatePrompt", sess.Language), keyboards.Back(sess.Language))
+
+	case data == "gsettings":
+		h.answerCb(cb.ID, "")
+		g := h.store.GetGroup(chat.ID)
+		msg := fmt.Sprintf("%s\n\nwelcome=%v\nlockdown=%v\nantiLinks=%v\nantiCaps=%v",
+			localization.Get("gsettingsTitle", sess.Language), g.WelcomeOn, g.Lockdown, g.AntiLinks, g.AntiCaps)
+		h.editMsg(chat.ID, msgID, msg, emptyKB)
+
 	case data == "admin_feedback":
 		h.answerCb(cb.ID, "")
 		feedbacks := h.store.GetFeedbacks()
@@ -740,6 +936,158 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 			return
 		}
 		h.sendMsg(chat.ID, localization.Get("pollCreated", lang), keyboards.MainMenu(h.cfg, lang))
+
+	case "awaiting_qr_text":
+		h.store.SetState(uid, "idle")
+		go h.fetchQR(chat.ID, uid, text, lang)
+
+	case "awaiting_weather_city":
+		h.store.SetState(uid, "idle")
+		go h.fetchWeather(chat.ID, uid, text, lang)
+
+	case "awaiting_translate_text":
+		sess = h.store.GetOrCreate(uid)
+		target, _ := sess.Data["tr_target"].(string)
+		if target == "" {
+			target = "en"
+		}
+		h.store.SetState(uid, "idle")
+		go h.fetchTranslate(chat.ID, uid, text, target, lang)
+
+	case "awaiting_convert":
+		parts := strings.Fields(text)
+		if len(parts) < 4 || !strings.EqualFold(parts[2], "to") {
+			h.sendMsg(chat.ID, localization.Get("convertInvalid", lang), keyboards.Back(lang))
+			return
+		}
+		h.store.SetState(uid, "idle")
+		go h.fetchConvert(chat.ID, uid, parts[0], parts[1], parts[3], lang)
+
+	case "awaiting_meme_template":
+		tmpl := strings.Fields(text)
+		if len(tmpl) == 0 {
+			h.sendMsg(chat.ID, localization.Get("memeSelectTemplate", lang), keyboards.MemeMenu(lang))
+			return
+		}
+		sess.Data["meme_template"] = tmpl[0]
+		h.store.SetSessionData(uid, sess.Data)
+		h.store.SetState(uid, "awaiting_meme_top")
+		h.sendMsg(chat.ID, localization.Get("memeTopText", lang), keyboards.Back(lang))
+
+	case "awaiting_meme_top":
+		sess.Data["meme_top"] = text
+		h.store.SetSessionData(uid, sess.Data)
+		h.store.SetState(uid, "awaiting_meme_bottom")
+		h.sendMsg(chat.ID, localization.Get("memeBottomText", lang), keyboards.Back(lang))
+
+	case "awaiting_meme_bottom":
+		sess = h.store.GetOrCreate(uid)
+		tmpl, _ := sess.Data["meme_template"].(string)
+		top, _ := sess.Data["meme_top"].(string)
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("memeGenerating", lang), emptyKB)
+		go h.fetchMeme(chat.ID, uid, tmpl, top, text, lang)
+
+	case "awaiting_reddit_sub":
+		h.store.SetState(uid, "idle")
+		go h.fetchReddit(chat.ID, uid, text, lang)
+
+	case "awaiting_remind":
+		dur, body, ok := h.parseRemind(text)
+		if !ok {
+			h.sendMsg(chat.ID, localization.Get("remindInvalidDuration", lang), keyboards.Back(lang))
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.store.AddReminder(&session.Reminder{
+			ChatID:    chat.ID,
+			UserID:    int64(user.ID),
+			Text:      body,
+			DueAt:     time.Now().Add(dur).Unix(),
+			CreatedAt: time.Now().Format(time.RFC3339),
+		})
+		h.sendMsg(chat.ID, localization.Get("remindSaved", lang), keyboards.Back(lang))
+
+	case "awaiting_ban_user":
+		h.store.SetState(uid, "idle")
+		if target := h.targetFrom(update.Message); target != 0 {
+			h.doBan(chat.ID, target, lang)
+		} else {
+			h.sendMsg(chat.ID, localization.Get("banPrompt", lang), emptyKB)
+		}
+
+	case "awaiting_del":
+		h.store.SetState(uid, "idle")
+		n := 0
+		if update.Message.ReplyToMessage != nil {
+			if h.deleteMsg(chat.ID, update.Message.ReplyToMessage.MessageID) {
+				n = 1
+			}
+		} else if num, err := strconv.Atoi(strings.TrimSpace(text)); err == nil {
+			if num > 100 {
+				num = 100
+			}
+			if num < 1 {
+				num = 1
+			}
+			ids := make([]int, 0, num)
+			for i := 0; i < 50; i++ {
+				ids = append(ids, update.Message.MessageID-i)
+			}
+			for i := 0; i < num; i++ {
+				ids = append(ids, update.Message.MessageID-i)
+			}
+			for _, id := range ids {
+				if h.deleteMsg(chat.ID, id) {
+					n++
+				}
+			}
+		}
+		h.sendMsg(chat.ID, localization.Get("delSuccess", lang, n), emptyKB)
+
+	case "awaiting_welcome_msg":
+		g := h.store.GetGroup(chat.ID)
+		g.Welcome = text
+		g.WelcomeOn = true
+		g.Title = chat.Title
+		h.store.SetGroup(g)
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("welcomeMsgSent", lang), emptyKB)
+
+	case "awaiting_ginfo_name":
+		if _, err := h.bot.Request(tgbotapi.SetChatTitleConfig{ChatID: chat.ID, Title: text}); err != nil {
+			log.Printf("ginfo name error: %v", err)
+			h.sendMsg(chat.ID, localization.Get("error", lang), emptyKB)
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("ginfoNameSet", lang), emptyKB)
+
+	case "awaiting_ginfo_desc":
+		if _, err := h.bot.Request(tgbotapi.SetChatDescriptionConfig{ChatID: chat.ID, Description: text}); err != nil {
+			log.Printf("ginfo desc error: %v", err)
+			h.sendMsg(chat.ID, localization.Get("error", lang), emptyKB)
+			return
+		}
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("ginfoDescSet", lang), emptyKB)
+
+	case "awaiting_stream_url":
+		g := h.store.GetGroup(chat.ID)
+		g.StreamURL = text
+		g.Title = chat.Title
+		h.store.SetGroup(g)
+		h.store.SetState(uid, "idle")
+		h.sendMsg(chat.ID, localization.Get("streamSaved", lang), emptyKB)
+
+	case "awaiting_post":
+		h.store.SetState(uid, "idle")
+		if _, err := h.bot.Send(tgbotapi.NewMessage(chat.ID, text)); err != nil {
+			log.Printf("post error: %v", err)
+			h.sendMsg(chat.ID, localization.Get("postError", lang), emptyKB)
+			return
+		}
+		h.sendMsg(chat.ID, localization.Get("postSuccess", lang), emptyKB)
 
 	case "awaiting_yt_url":
 		if !isValidYouTubeURL(text) {
@@ -1017,7 +1365,13 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		}
 
 	default:
-		if isValidTikTokURL(text) {
+		if h.isChat(chat) && h.botIsAdmin(chat.ID) {
+			h.trackMessage(chat, user, text, lang)
+		}
+		if update.Message.ForwardFromChat != nil || update.Message.ForwardSenderName != "" {
+			h.sendMsg(chat.ID, localization.Get("forwardProcessing", lang), emptyKB)
+			go h.forwardMedia(chat.ID, uid, update.Message, lang)
+		} else if isValidTikTokURL(text) {
 			sess.Data["tt_url"] = text
 			h.store.SetSessionData(uid, sess.Data)
 			h.sendMsg(chat.ID, localization.Get("ttDownloading", lang), keyboards.Back(lang))
@@ -1042,6 +1396,12 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 			h.store.SetSessionData(uid, sess.Data)
 			h.sendMsg(chat.ID, localization.Get("twDownloading", lang), keyboards.Back(lang))
 			go h.fetchTwitterInfo(chat.ID, uid, text, lang)
+		} else if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
+			h.store.SetState(uid, "awaiting_reurl_url")
+			sess.Data["reurl_url"] = text
+			h.store.SetSessionData(uid, sess.Data)
+			h.sendMsg(chat.ID, localization.Get("reurlSending", lang), keyboards.Back(lang))
+			go h.fetchReurl(chat.ID, text, lang)
 		} else if isValidYouTubeURL(text) {
 			sess.Data["yt_url"] = text
 			h.store.SetSessionData(uid, sess.Data)

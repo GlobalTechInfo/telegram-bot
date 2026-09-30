@@ -1,6 +1,27 @@
 # Telegram Multipurpose Bot
 
-A feature-rich multipurpose Telegram bot with media downloading, search engines, text/image effects, URL shortener, news, sports scores, artistic effects, multi-language support, and configurable inline menus. Built with Go, uses BoltDB for persistence.
+A feature-rich multipurpose Telegram bot with media downloading, search engines, text/image effects, URL shortener, news, sports scores, group and channel administration, reminders, and 13 languages. Built with Go, uses BoltDB for persistence.
+
+## Interface
+
+The main menu stays at **11 buttons**; everything else lives one level down.
+
+| Main menu | Submenu | Contains |
+|---|---|---|
+| ❓ Help | — | Command list |
+| 👤 Profile | — | Your user info |
+| ⚙️ Settings | — | Language, notifications |
+| 💬 Feedback | — | Free-text feedback |
+| 📊 Poll | — | Two-step poll creator |
+| ⬇️ Download | → | YouTube, Instagram, TikTok, Facebook, Pinterest, Snapchat, Twitter |
+| 🔍 Search | → | Pinterest, Sticker, Imgur, YouTube, Bing web, Bing images |
+| 🎨 Create | → | Text Maker (TextPro/Photooxy/Ephoto), Meme, Image Effects, Artistic |
+| 🧰 Tools | → | QR, Weather, Translate, Convert, Short URL, Remind, History, Reddit |
+| 📢 More | → | News, Sports, Poll, **About** |
+| 🛡️ Manage | → | Groups, Stats, Group Settings, Welcome, Ban, Kick, Mute, Invite, Purge |
+
+Group commands need the bot to be an **administrator** in that chat. The Manage
+menu is hidden in channels, where only channel admin actions apply.
 
 ## Features
 
@@ -15,6 +36,40 @@ A feature-rich multipurpose Telegram bot with media downloading, search engines,
 | **Snapchat** | Stories, spotlight |
 | **Twitter/X** | Media downloads |
 
+### 🛡️ Group & Channel Administration
+Reply to a message, or pass `@username`, to act on a member.
+
+- **Ban / Unban** — ban with message deletion, revoke on unban
+- **Kick** — remove without a permanent ban
+- **Mute** — restrict permissions (silences the member)
+- **Promote / Demote** — grant or remove admin rights
+- **Purge** — delete one message (reply) or the last 1–100 (send a number)
+- **Invite Link** — create a fresh invite link and post it
+- **Welcome Message** — greets new members, supports `{user}`, `{username}`, `{group}`
+- **Group Settings** — toggle welcome, lockdown, anti-links, anti-caps
+- **Group Stats** — message counter and live member count
+- **Channel Settings / Stats** — per-channel info
+- **Moderation** — lockdown mutes the sender and deletes their message
+- **Stream Link** — store a live stream URL on the chat record
+- **Post** — relay a message into a group or channel
+- **Group List** — every chat the bot has been active in
+
+Anti-link and anti-caps are enforced on the message path, not via commands, so
+they apply to ordinary chat traffic rather than admin actions.
+
+### 🧰 Tools
+- **QR Code** — renders text or a URL as a PNG
+- **Weather** — current conditions by city (temperature, description, wind, humidity)
+- **Translate** — detects the source language, translates to a chosen target
+- **Unit Converter** — `5 kg to lb`, `100 usd to eur`
+- **Reminders** — `/remind 10m standup`, fires from a background ticker
+- **History** — your last 15 queries, per user
+- **Reddit** — fetch posts from a subreddit
+- **Meme** — generate from templates (Drake, Buzz, Change, Distracted, …)
+
+Reminder durations accept `s`, `m`, `h`, `d` in either `10m text` or `10 m text`
+form. Unreadable text is preserved; only the leading amount is parsed.
+
 ### 🔍 Search Engines
 - **Pinterest Search** — search and download images
 - **Sticker Search** — search stickers from API
@@ -26,6 +81,7 @@ A feature-rich multipurpose Telegram bot with media downloading, search engines,
 - **TextPro** — styled text (Neon Light, Avengers, Pornhub Style, Harry Potter, and more)
 - **Photooxy** — photo effects (Battle 4, TikTok, and more)
 - **Ephoto360** — ephoto effects (Wolf Galaxy, Free Fire Banner, Apex, and more)
+- **Memes** — text-on-image templates
 - **Image Effects** — blur, brightness, contrast, invert, grayscale, sharpen
 - **Artistic Effects** — pencil sketch, HDR, bokeh, thermal, X-ray, infrared, auto enhance
 
@@ -40,12 +96,14 @@ A feature-rich multipurpose Telegram bot with media downloading, search engines,
 
 ### ⚙️ General
 - **Auto URL Detection** — paste any supported link, bot auto-starts the download
-- **Multi-Language** — 13 languages (en, es, fr, de, hi, ur, sw, ha, yo, zu, am, af, ig)
-- **Inline Keyboard Menus** — contextual navigation with back buttons
+- **Multi-Language** — 13 languages (en, es, fr, de, hi, ur, sw, ha, yo, zu, am, af, ig), every string translated in all 13
+- **Inline Keyboard Menus** — 11-button main menu, six submenus, back navigation
+- **Forwarded Media** — re-download and repost media from a forwarded message
 - **Poll Creator** — two-step flow: question then options (2–10)
 - **Feedback System** — free-text feedback stored with timestamps
 - **User Tracking** — first seen, last seen, name/username tracking
-- **Admin Panel** — total users and feedback count
+- **Admin Panel** — total users and feedback count, with a feedback viewer
+- **Update Audit Log** — every command, callback and message is logged with chat, user and action
 - **Inline Mode** — `@botusername help` and `@botusername about`
 - **Concurrent Downloads** — semaphore-limited (max 2), 100MB cap
 - **Configurable API** — base URL and API key via `config.json` or `.env`
@@ -94,6 +152,7 @@ DB_PATH=/bot/data/bot.db
 | `API_BASE_URL` | No | Overrides `apiBaseUrl` in config.json |
 | `API_KEY` | No | Overrides `apiKey` in config.json |
 | `DB_PATH` | No | BoltDB file path (default: `./bot.db`) |
+| `PORT` | No | Health-check port (default: `8080`) |
 
 #### config.json
 
@@ -213,6 +272,21 @@ sudo systemctl start telegram-bot
 
 **Fly.io** — `fly launch` → `fly secrets set BOT_TOKEN=your_token_here` → `fly deploy`
 
+**Northflank / Koyeb** — same as Render. Set the health-check path to `/health`
+and the port to `8080`; the bot answers `200 {"status":"ok"}` there. It only
+long-polls Telegram, so this endpoint exists purely to satisfy the probe — if it
+is removed the host will terminate the service.
+
+### Health check
+
+```
+GET /health   → 200 {"status":"ok"}
+GET /healthz  → 200 {"status":"ok"}
+GET /         → 200 {"status":"ok"}
+```
+
+Port comes from `$PORT`, defaulting to `8080`.
+
 ## Commands
 
 | Command | Access | Description |
@@ -239,17 +313,43 @@ sudo systemctl start telegram-bot
 | `/sports` | Public | Open sports scores menu |
 | `/imageeffect` | Public | Apply effects to images |
 | `/artistic` | Public | Artistic effects for images |
-| `/admin` | Admin | Stats panel (users, feedback count) |
+| `/qr` | Public | Generate a QR code from text or a URL |
+| `/weather` | Public | Current weather for a city |
+| `/translate` | Public | Translate text to another language |
+| `/convert` | Public | Convert units (`5 kg to lb`) |
+| `/meme` | Public | Generate a meme from a template |
+| `/reddit` | Public | Fetch posts from a subreddit |
+| `/remind` | Public | Set a reminder; bare `/remind` lists yours |
+| `/history` | Public | Your recent queries |
+| `/ban` | Group admin | Ban the replied-to user |
+| `/unban` | Group admin | Unban a user |
+| `/kick` | Group admin | Kick the replied-to user |
+| `/mute` | Group admin | Mute the replied-to user |
+| `/promote` | Group admin | Promote a user to admin |
+| `/demote` | Group admin | Remove admin from a user |
+| `/del` | Group admin | Delete a message (reply) or the last 1–100 |
+| `/invite` | Group admin | Create and post an invite link |
+| `/welcome` | Group admin | Set the new-member welcome message |
+| `/ginfo` | Group admin | Show group info |
+| `/gsettings` | Group admin | Toggle welcome, lockdown, anti-links, anti-caps |
+| `/lockdown` | Group admin | Mute and delete every message |
+| `/gstats` | Group admin | Message counter and member count |
+| `/groups` | Bot admin | List every known group |
+| `/chstats` | Channel admin | Channel stats |
+| `/stream` | Group admin | Store a live stream link on the chat |
+| `/post` | Group admin | Post a message into the group or channel |
+| `/admin` | Bot admin | Stats panel (users, feedback count) |
 
 ## Architecture
 
 ```
 main.go                  Entry point — loads config/env, connects to Telegram, event loop
 ├── config/config.go     Configuration loading, IsAdmin(), URL/key helpers
-├── handlers/handlers.go Command/callback/message handlers, all download/search/effect logic
-├── keyboards/keyboards.go Inline keyboard markup builders
-├── localization/localization.go i18n — 13 languages with English fallback
-├── session/session.go   BoltDB persistence (users, sessions, feedback, settings)
+├── handlers/handlers.go Command/callback/message dispatch, download/search/effect logic
+├── handlers/admin.go    Group & channel administration, reminders, tool API calls
+├── keyboards/keyboards.go Inline keyboard markup builders (main menu + 6 submenus)
+├── localization/localization.go i18n — 13 languages, every key in every language
+├── session/session.go   BoltDB persistence (users, sessions, feedback, groups, reminders, queries)
 ├── config.json          Bot configuration (commands, UI, features, localization, API)
 ├── .env                 Secrets (BOT_TOKEN, ADMIN_IDS, API config, DB_PATH)
 └── .env.example         Template for .env
@@ -263,19 +363,59 @@ main.go                  Entry point — loads config/env, connects to Telegram,
 - **Memory**: 100MB per-download cap, explicit GC after large transfers
 - **State Machine**: Per-user state tracking for multi-step flows
 - **Panic Safety**: All goroutines have deferred panic recovery
+- **No shared per-update state**: updates are concurrent, so a request's message is
+  always passed as an argument — never stored on `Handler`
+
+### Storage buckets
+
+| Bucket | Key | Contents |
+|---|---|---|
+| `users` | user ID | name, username, first/last seen |
+| `sessions` | chat ID | language, state machine, transient data |
+| `feedbacks` | sequence | feedback entries, capped at 500 |
+| `groups` | chat ID | per-chat settings, welcome, counters, stream URL |
+| `reminders` | sequence | pending reminders, deleted once fired |
+| `queries` | sequence | per-user query history, capped at 200 |
+
+## Building and Testing
+
+```bash
+make build     # build the binary
+make run       # run from source
+make test      # run the test suite
+make vet       # go vet
+make fmt       # gofmt -w .
+```
+
+Use `make` rather than bare `go build` / `go run` on memory-constrained hosts.
+The `Makefile` pins `GOMEMLIMIT=700MiB`, because the Go compiler segfaults when
+swap is exhausted. `go run` does not inherit that limit — use `make run`.
+
+### Tests
+
+```
+localization/  key parity across all 13 languages, no self-referential values, English fallback
+handlers/      every Get() key resolves; every config command dispatched;
+               every state handled; every menu button has a callback handler;
+               main menu within its 11-button budget;
+               API response parsing against captured payloads;
+               live API checks (set LIVE_API=1 to enable)
+session/       group config, reminder lifecycle, query log cap and user scoping
+```
 
 ## Adding a New Language
 
 1. Add strings to the language map in `localization/localization.go` (all 13 languages)
-2. `Get()` falls back to English for missing keys (defensive only — define all keys)
+2. `make test` — the key-parity test fails if any language is missing a key
 
 ## Adding a New Feature
 
-1. Add handler logic in `handlers/handlers.go`
+1. Add handler logic in `handlers/handlers.go` or `handlers/admin.go`
 2. Add localization strings in `localization/localization.go` (all 13 languages)
 3. Add keyboard if needed in `keyboards/keyboards.go`
-4. Register command + callback + state + auto-detect in `handlers/handlers.go`
-5. Add command + menu button in `config.json`
+4. Register command + callback + state + auto-detect
+5. Add command in `config.json`; add the menu button to a submenu, not the main grid
+6. `make test` — dispatch, state, menu and key tests will catch omissions
 
 ## License
 

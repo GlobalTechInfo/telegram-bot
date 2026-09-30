@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -103,7 +105,7 @@ func main() {
 	defer store.Close()
 	store.Cleanup()
 
-	handler := handlers.New(bot, cfg, store)
+	handler := handlers.New(bot, cfg, store, token)
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -156,6 +158,16 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			handler.FireReminders()
+		}
+	}()
+
+	go serveHealth()
+
+	go func() {
 		<-sigCh
 		log.Println("🛑 Shutting down...")
 		bot.StopReceivingUpdates()
@@ -171,14 +183,71 @@ func main() {
 				}
 			}()
 			if u.Message != nil && u.Message.IsCommand() {
+				logUpdate(u.Message.Chat, u.Message.From, "cmd", u.Message.Command())
 				handler.HandleCommand(u)
+			} else if u.Message != nil && u.Message.NewChatMembers != nil {
+				logUpdate(u.Message.Chat, u.Message.From, "new_members", "")
+				handler.HandleNewMembers(u)
 			} else if u.CallbackQuery != nil {
+				logUpdate(u.CallbackQuery.Message.Chat, u.CallbackQuery.From, "cb", u.CallbackQuery.Data)
 				handler.HandleCallback(u)
 			} else if u.InlineQuery != nil {
 				handler.HandleInline(u)
 			} else if u.Message != nil {
+				logUpdate(u.Message.Chat, u.Message.From, "msg", "")
 				handler.HandleMessage(u)
 			}
 		}(update)
+	}
+}
+
+func logUpdate(chat *tgbotapi.Chat, user *tgbotapi.User, kind, detail string) {
+	who := "?"
+	var id int64
+	if user != nil {
+		who = user.UserName
+		if who == "" {
+			who = user.FirstName
+		}
+		id = user.ID
+	}
+	title := chat.Title
+	if title == "" {
+		title = chat.Type
+	}
+	if detail != "" {
+		log.Printf("→ [%s] %s@%d /%s", title, who, id, detail)
+		return
+	}
+	log.Printf("→ [%s] %s@%d", title, who, id)
+}
+
+// serveHealth answers the HTTP health checks that PaaS hosts (Northflank, Koyeb,
+// Render, Fly) require. The bot itself only long-polls Telegram, so without a
+// listener the host sees a refused connection and terminates the service.
+// Port comes from $PORT, which hosts set automatically; default 8080.
+func serveHealth() {
+	port := getEnv(map[string]string{}, "PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	mux := http.NewServeMux()
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"ok"}`)
+	}
+	mux.HandleFunc("/health", handler)
+	mux.HandleFunc("/healthz", handler)
+	mux.HandleFunc("/", handler)
+
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("health server error: %v", err)
 	}
 }

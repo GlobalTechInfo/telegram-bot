@@ -14,40 +14,258 @@
   },
   "timezone": "Asia/Karachi",
   "commands": {
-    "start": { "enabled": true, "description": "Start the bot and show main menu" },
-    "help": { "enabled": true, "description": "Show help information" },
-    "settings": { "enabled": true, "description": "Configure your preferences" },
-    "profile": { "enabled": true, "description": "View your profile" },
-    "feedback": { "enabled": true, "description": "Send feedback to the developers" },
-    "about": { "enabled": true, "description": "About this bot" },
-    "poll": { "enabled": true, "description": "Create a quick poll" },
-    "yt": { "enabled": true, "description": "Download YouTube videos" },
-    "ig": { "enabled": true, "description": "Download Instagram posts" },
-    "tt": { "enabled": true, "description": "Download TikTok videos" },
-    "fb": { "enabled": true, "description": "Download Facebook videos" },
-    "pin": { "enabled": true, "description": "Download Pinterest videos" },
-    "sc": { "enabled": true, "description": "Download Snapchat stories/spotlight" },
-    "tw": { "enabled": true, "description": "Download Twitter/X posts" },
-    "bing": { "enabled": true, "description": "Search the web or find images" },
-    "search": { "enabled": true, "description": "Search Pinterest, web, images and more" },
-    "textmaker": { "enabled": true, "description": "Create text art and typography" },
-    "shorturl": { "enabled": true, "description": "Shorten URLs" },
-    "news": { "enabled": true, "description": "Latest news headlines" },
-    "sports": { "enabled": true, "description": "Live sports scores" },
-	"imageeffect": { "enabled": true, "description": "Apply effects to images" },
-	"artistic": { "enabled": true, "description": "Artistic effects for images" },
-	"admin": { "enabled": true, "description": "Admin panel (admins only)" }
+    "start": {
+      "enabled": true,
+      "description": "Start the bot and show main menu"
+    },
+    "help": {
+      "enabled": true,
+      "description": "Show help information"
+    },
+    "settings": {
+      "enabled": true,
+      "description": "Configure your preferences"
+    },
+    "profile": {
+      "enabled": true,
+      "description": "View your profile"
+    },
+    "feedback": {
+      "enabled": true,
+      "description": "Send feedback to the developers"
+    },
+    "about": {
+      "enabled": true,
+      "description": "About this bot"
+    },
+    "poll": {
+      "enabled": true,
+      "description": "Create a quick poll"
+    },
+    "yt": {
+      "enabled": true,
+      "description": "Download YouTube videos"
+    },
+    "ig": {
+      "enabled": true,
+      "description": "Download Instagram posts"
+    },
+    "tt": {
+      "enabled": true,
+      "description": "Download TikTok videos"
+    },
+    "fb": {
+      "enabled": true,
+      "description": "Download Facebook videos"
+    },
+    "pin": {
+      "enabled": true,
+      "description": "Download Pinterest videos"
+    },
+    "sc": {
+      "enabled": true,
+      "description": "Download Snapchat stories/spotlight"
+    },
+    "tw": {
+      "enabled": true,
+      "description": "Download Twitter/X posts"
+    },
+    "bing": {
+      "enabled": true,
+      "description": "Search the web or find images"
+    },
+    "search": {
+      "enabled": true,
+      "description": "Search Pinterest, web, images and more"
+    },
+    "textmaker": {
+      "enabled": true,
+      "description": "Create text art and typography"
+    },
+    "shorturl": {
+      "enabled": true,
+      "description": "Shorten URLs"
+    },
+    "news": {
+      "enabled": true,
+      "description": "Latest news headlines"
+    },
+    "sports": {
+      "enabled": true,
+      "description": "Live sports scores"
+    },
+    "imageeffect": {
+      "enabled": true,
+      "description": "Apply effects to images"
+    },
+    "artistic": {
+      "enabled": true,
+      "description": "Artistic effects for images"
+    },
+    "admin": {
+      "enabled": true,
+      "description": "Admin panel (admins only)"
+    },
+    "qr": {
+      "enabled": true,
+      "description": "Generate QR code from text or URL"
+    },
+    "weather": {
+      "enabled": true,
+      "description": "Current weather by city"
+    },
+    "translate": {
+      "enabled": true,
+      "description": "Translate text to another language"
+    },
+    "convert": {
+      "enabled": true,
+      "description": "Convert units"
+    },
+    "meme": {
+      "enabled": true,
+      "description": "Generate memes from templates"
+    },
+    "reddit": {
+      "enabled": true,
+      "description": "Fetch posts from a subreddit"
+    },
+    "remind": {
+      "enabled": true,
+      "description": "Set a reminder"
+    },
+    "history": {
+      "enabled": true,
+      "description": "Show your recent queries"
+    },
+    "ban": {
+      "enabled": true,
+      "description": "Ban a user in the group"
+    },
+    "kick": {
+      "enabled": true,
+      "description": "Kick a user from the group"
+    },
+    "mute": {
+      "enabled": true,
+      "description": "Mute a user in the group"
+    },
+    "unban": {
+      "enabled": true,
+      "description": "Unban a user in the group"
+    },
+    "promote": {
+      "enabled": true,
+      "description": "Promote a user to admin"
+    },
+    "demote": {
+      "enabled": true,
+      "description": "Remove admin from a user"
+    },
+    "del": {
+      "enabled": true,
+      "description": "Delete messages (reply or 1-100)"
+    },
+    "invite": {
+      "enabled": true,
+      "description": "Create a group invite link"
+    },
+    "welcome": {
+      "enabled": true,
+      "description": "Set the new-member welcome message"
+    },
+    "groups": {
+      "enabled": true,
+      "description": "List known groups"
+    },
+    "channels": {
+      "enabled": true,
+      "description": "List known channels"
+    },
+    "ginfo": {
+      "enabled": true,
+      "description": "Change group name or description"
+    },
+    "gsettings": {
+      "enabled": true,
+      "description": "Toggle welcome, lockdown, antilinks, anticaps"
+    },
+    "gstats": {
+      "enabled": true,
+      "description": "Group message and member stats"
+    },
+    "chsettings": {
+      "enabled": true,
+      "description": "Channel settings"
+    },
+    "chstats": {
+      "enabled": true,
+      "description": "Channel stats"
+    },
+    "stream": {
+      "enabled": true,
+      "description": "Store a live stream link for the chat"
+    },
+    "moderate": {
+      "enabled": true,
+      "description": "Moderation switches for the group"
+    },
+    "post": {
+      "enabled": true,
+      "description": "Post a message to the group or channel"
+    }
   },
   "adminIds": [],
   "features": {
     "inlineMode": true,
     "userTracking": true,
     "feedbackSystem": true,
-    "polls": true
+    "polls": true,
+    "qr": "Generate QR code from text or URL",
+    "weather": "Current weather by city",
+    "translate": "Translate text to another language",
+    "convert": "Convert units",
+    "meme": "Generate memes from templates",
+    "reddit": "Fetch posts from a subreddit",
+    "remind": "Set a reminder",
+    "history": "Show your recent queries",
+    "ban": "Ban a user in the group",
+    "kick": "Kick a user from the group",
+    "mute": "Mute a user in the group",
+    "unban": "Unban a user in the group",
+    "promote": "Promote a user to admin",
+    "demote": "Remove admin from a user",
+    "del": "Delete messages (reply or 1-100)",
+    "invite": "Create a group invite link",
+    "welcome": "Set the new-member welcome message",
+    "groups": "List known groups",
+    "channels": "List known channels",
+    "ginfo": "Change group name or description",
+    "gsettings": "Toggle welcome, lockdown, antilinks, anticaps",
+    "gstats": "Group message and member stats",
+    "chsettings": "Channel settings",
+    "chstats": "Channel stats",
+    "stream": "Store a live stream link for the chat",
+    "moderate": "Moderation switches for the group",
+    "post": "Post a message to the group or channel"
   },
   "localization": {
     "defaultLanguage": "en",
-    "supportedLanguages": ["en", "es", "fr", "de", "hi", "ur", "sw", "ha", "yo", "zu", "am", "af", "ig"]
+    "supportedLanguages": [
+      "en",
+      "es",
+      "fr",
+      "de",
+      "hi",
+      "ur",
+      "sw",
+      "ha",
+      "yo",
+      "zu",
+      "am",
+      "af",
+      "ig"
+    ]
   },
   "apiBaseUrl": "https://api.qasimdev.dpdns.org/api",
   "apiKey": "qasim-dev",
@@ -56,26 +274,61 @@
     "mainMenu": {
       "cols": 2,
       "buttons": [
-        { "label": "Help", "icon": "❓", "action": "help" },
-        { "label": "Profile", "icon": "👤", "action": "profile" },
-        { "label": "Settings", "icon": "⚙️", "action": "settings" },
-        { "label": "Feedback", "icon": "💬", "action": "feedback" },
-        { "label": "Poll", "icon": "📊", "action": "poll" },
-        { "label": "YouTube", "icon": "📥", "action": "yt" },
-        { "label": "Instagram", "icon": "📸", "action": "ig" },
-        { "label": "TikTok", "icon": "📱", "action": "tt" },
-        { "label": "Facebook", "icon": "📘", "action": "fb" },
-        { "label": "Pinterest", "icon": "📌", "action": "pin" },
-        { "label": "Snapchat", "icon": "👻", "action": "sc" },
-        { "label": "Twitter", "icon": "🐦", "action": "tw" },
-        { "label": "Search", "icon": "🔍", "action": "search" },
-        { "label": "Text Maker", "icon": "🎨", "action": "textmaker" },
-        { "label": "Short URL", "icon": "🔗", "action": "shorturl" },
-        { "label": "News", "icon": "📰", "action": "news" },
-        { "label": "Sports", "icon": "⚽", "action": "sports" },
-        { "label": "Image Effect", "icon": "🎨", "action": "imageeffect" },
-        { "label": "Artistic Effect", "icon": "🖌️", "action": "artistic" },
-        { "label": "About", "icon": "ℹ️", "action": "about" }
+        {
+          "label": "Help",
+          "icon": "❓",
+          "action": "help"
+        },
+        {
+          "label": "Profile",
+          "icon": "👤",
+          "action": "profile"
+        },
+        {
+          "label": "Settings",
+          "icon": "⚙️",
+          "action": "settings"
+        },
+        {
+          "label": "Feedback",
+          "icon": "💬",
+          "action": "feedback"
+        },
+        {
+          "label": "Poll",
+          "icon": "📊",
+          "action": "poll"
+        },
+        {
+          "label": "Download",
+          "icon": "⬇️",
+          "action": "dl_menu"
+        },
+        {
+          "label": "Search",
+          "icon": "🔍",
+          "action": "search_menu"
+        },
+        {
+          "label": "Create",
+          "icon": "🎨",
+          "action": "create_menu"
+        },
+        {
+          "label": "Tools",
+          "icon": "🧰",
+          "action": "tools_menu"
+        },
+        {
+          "label": "More",
+          "icon": "📢",
+          "action": "more_menu"
+        },
+        {
+          "label": "Manage",
+          "icon": "🛡️",
+          "action": "groups_menu"
+        }
       ]
     },
     "confirmButtons": {

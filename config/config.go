@@ -63,12 +63,12 @@ type Features struct {
 }
 
 type BotConfig struct {
-	Name            string `json:"name"`
-	Username        string `json:"username"`
-	Description     string `json:"description"`
-	Version         string `json:"version"`
-	Photo           string `json:"photo"`
-	StartupMessage  string `json:"startupMessage"`
+	Name           string `json:"name"`
+	Username       string `json:"username"`
+	Description    string `json:"description"`
+	Version        string `json:"version"`
+	Photo          string `json:"photo"`
+	StartupMessage string `json:"startupMessage"`
 }
 
 type Owner struct {
@@ -78,16 +78,16 @@ type Owner struct {
 }
 
 type Config struct {
-	Bot          BotConfig                  `json:"bot"`
-	Owner        Owner                      `json:"owner"`
-	Timezone     string                     `json:"timezone"`
-	Commands     map[string]CommandConfig   `json:"commands"`
-	AdminIDs     []int64                    `json:"adminIds"`
-	Features     Features                   `json:"features"`
-	Localization Localization               `json:"localization"`
-	UI           UI                         `json:"ui"`
-	ApiBaseURL   string                     `json:"apiBaseUrl"`
-	ApiKey       string                     `json:"apiKey"`
+	Bot          BotConfig                `json:"bot"`
+	Owner        Owner                    `json:"owner"`
+	Timezone     string                   `json:"timezone"`
+	Commands     map[string]CommandConfig `json:"commands"`
+	AdminIDs     []int64                  `json:"adminIds"`
+	Features     Features                 `json:"features"`
+	Localization Localization             `json:"localization"`
+	UI           UI                       `json:"ui"`
+	ApiBaseURL   string                   `json:"apiBaseUrl"`
+	ApiKey       string                   `json:"apiKey"`
 }
 
 func (c *Config) EffectiveApiBaseURL() string {

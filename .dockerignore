@@ -1,5 +1,10 @@
 .env
-bot.db
+*.db
 telegram-bot
+bot-data/
+*.log
 .git
 *.md
+Makefile
+install.sh
+install.ps1

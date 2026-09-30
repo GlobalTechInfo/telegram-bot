@@ -30,6 +30,36 @@ type Feedback struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type Reminder struct {
+	ID        int64  `json:"id"`
+	ChatID    int64  `json:"chatId"`
+	UserID    int64  `json:"userId"`
+	Text      string `json:"text"`
+	DueAt     int64  `json:"dueAt"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type QueryLog struct {
+	UserID    int64  `json:"userId"`
+	Command   string `json:"command"`
+	Input     string `json:"input"`
+	Timestamp string `json:"timestamp"`
+}
+
+type GroupConfig struct {
+	ChatID     int64  `json:"chatId"`
+	Title      string `json:"title"`
+	Welcome    string `json:"welcome"`
+	WelcomeOn  bool   `json:"welcomeOn"`
+	Lockdown   bool   `json:"lockdown"`
+	AntiLinks  bool   `json:"antiLinks"`
+	AntiCaps   bool   `json:"antiCaps"`
+	MsgCount   int    `json:"msgCount"`
+	LastActive string `json:"lastActive"`
+	StreamURL  string `json:"streamUrl"`
+	WarnCount  int    `json:"warnCount"`
+}
+
 type Store struct {
 	db *bbolt.DB
 }
@@ -41,7 +71,7 @@ func NewStore(dbPath string) *Store {
 	}
 
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{"users", "sessions", "feedbacks"} {
+		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -210,6 +240,160 @@ func (s *Store) GetFeedbacks() []Feedback {
 	return feedbacks
 }
 
+func (s *Store) GetGroup(chatID int64) *GroupConfig {
+	g := &GroupConfig{ChatID: chatID}
+	s.db.View(func(tx *bbolt.Tx) error {
+		data := tx.Bucket([]byte("groups")).Get(itob(chatID))
+		if data == nil {
+			return nil
+		}
+		return json.Unmarshal(data, g)
+	})
+	return g
+}
+
+func (s *Store) SetGroup(g *GroupConfig) {
+	encoded, err := json.Marshal(g)
+	if err != nil {
+		return
+	}
+	s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("groups")).Put(itob(g.ChatID), encoded)
+	})
+}
+
+func (s *Store) ListGroups() []*GroupConfig {
+	var out []*GroupConfig
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("groups")).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var g GroupConfig
+			if err := json.Unmarshal(v, &g); err == nil {
+				out = append(out, &g)
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+func (s *Store) AddReminder(r *Reminder) {
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		return
+	}
+	s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("reminders"))
+		id, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+		r.ID = int64(id)
+		encoded, err = json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		return b.Put(itob(r.ID), encoded)
+	})
+}
+
+func (s *Store) ListReminders(userID int64) []Reminder {
+	var out []Reminder
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("reminders")).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var r Reminder
+			if err := json.Unmarshal(v, &r); err != nil {
+				continue
+			}
+			if r.UserID == userID {
+				out = append(out, r)
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+func (s *Store) DueReminders(now int64) []Reminder {
+	var out []Reminder
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("reminders")).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var r Reminder
+			if err := json.Unmarshal(v, &r); err != nil {
+				continue
+			}
+			if r.DueAt <= now {
+				out = append(out, r)
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+func (s *Store) DeleteReminder(id int64) {
+	s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("reminders")).Delete(itob(id))
+	})
+}
+
+func (s *Store) LogQuery(userID int64, command, input string) {
+	q := QueryLog{
+		UserID:    userID,
+		Command:   command,
+		Input:     truncate(input, 120),
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	encoded, err := json.Marshal(q)
+	if err != nil {
+		return
+	}
+	s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("queries"))
+		id, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+		if b.Stats().KeyN > 200 {
+			c := b.Cursor()
+			if k, _ := c.First(); k != nil {
+				b.Delete(k)
+			}
+		}
+		return b.Put(itob(int64(id)), encoded)
+	})
+}
+
+func (s *Store) RecentQueries(userID int64, limit int) []QueryLog {
+	var out []QueryLog
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("queries")).Cursor()
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+			var q QueryLog
+			if err := json.Unmarshal(v, &q); err != nil {
+				continue
+			}
+			if q.UserID == userID {
+				out = append(out, q)
+				if len(out) >= limit {
+					break
+				}
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
 func (s *Store) Cleanup() {
 	now := time.Now()
 	s.db.Update(func(tx *bbolt.Tx) error {
@@ -244,6 +428,24 @@ func (s *Store) Cleanup() {
 		}
 		if deleted > 0 {
 			log.Printf("Cleaned up %d old sessions", deleted)
+		}
+
+		reminderBucket := tx.Bucket([]byte("reminders"))
+		rc := reminderBucket.Cursor()
+		nowUnix := time.Now().Unix()
+		rdeleted := 0
+		for k, v := rc.First(); k != nil; k, v = rc.Next() {
+			var r Reminder
+			if err := json.Unmarshal(v, &r); err != nil {
+				continue
+			}
+			if r.DueAt < nowUnix-86400 {
+				reminderBucket.Delete(k)
+				rdeleted++
+			}
+		}
+		if rdeleted > 0 {
+			log.Printf("Cleaned up %d fired reminders", rdeleted)
 		}
 
 		return nil
