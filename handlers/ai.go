@@ -56,32 +56,6 @@ func aiPrompt(lang, text string) string {
 	return fmt.Sprintf("Reply in %s.\n\n%s", localization.LanguageName(lang), text)
 }
 
-// aiPost sends one request to the agent.
-//
-// The key travels as an Authorization header and the message as a form-encoded
-// body. Both used to go in the query string, where every proxy, load balancer and
-// worker log between here and the endpoint records the full URL, so the key and
-// the user's private message ended up in logs all along the way.
-func (h *Handler) aiPost(base, key string, form url.Values) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodPost, base, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Authorization", "Bearer "+key)
-
-	resp, err := aiClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("agent endpoint returned status %d", resp.StatusCode)
-	}
-	return readBody(resp, maxAPISize)
-}
-
 // safeErr renders an error for a log line or a chat message without leaking the
 // request URL or the key. A *url.Error carries the URL it failed to fetch, and
 // the key used to be part of it; /ai status also shows errors to whoever is in
@@ -117,14 +91,30 @@ func (h *Handler) aiReply(text, lang string) (string, error) {
 		text = string(r[:maxChars])
 	}
 
-	raw, err := h.aiPost(base, key, url.Values{
-		"lang": []string{lang},
-		"text": []string{aiPrompt(lang, text)},
-	})
+	// The endpoint reads its arguments from the query string and is deployed that
+	// way, so the request stays a GET. The key is therefore in the URL: safeErr
+	// below is what keeps it out of the logs and out of any chat.
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	endpoint := base + sep + "apikey=" + url.QueryEscape(key) +
+		"&lang=" + url.QueryEscape(lang) +
+		"&text=" + url.QueryEscape(aiPrompt(lang, text))
+
+	resp, err := aiClient.Get(endpoint)
 	if err != nil {
-		// safeErr keeps the key and the message out of the log and out of the
-		// chat: a transport error embeds the full request URL.
 		return "", errors.New(safeErr(err, key))
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("agent endpoint returned status %d", resp.StatusCode)
+	}
+
+	raw, err := readBody(resp, maxAPISize)
+	if err != nil {
+		return "", err
 	}
 
 	var env aiEnvelope
