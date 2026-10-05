@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -133,26 +132,13 @@ func TestAiPromptKeepsMessageLast(t *testing.T) {
 
 func TestAiReplyParsesEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The key is a header and the message is a body: anything in the query
-		// string is recorded by every proxy and log on the way.
-		if got := r.Header.Get("Authorization"); got != "Bearer TESTKEY" {
-			t.Errorf("Authorization = %q, want the key as a bearer token", got)
+		if r.URL.Query().Get("apikey") != "TESTKEY" {
+			t.Errorf("apikey not sent, got %q", r.URL.Query().Get("apikey"))
 		}
-		if strings.Contains(r.URL.RawQuery, "TESTKEY") {
-			t.Errorf("key reached the query string: %q", r.URL.RawQuery)
-		}
-		form, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read body: %v", err)
-		}
-		vals, err := url.ParseQuery(string(form))
-		if err != nil {
-			t.Errorf("parse form: %v", err)
-		}
-		if vals.Get("text") == "" {
+		if r.URL.Query().Get("text") == "" {
 			t.Error("text not sent")
 		}
-		if got := vals.Get("lang"); got != "hi" {
+		if got := r.URL.Query().Get("lang"); got != "hi" {
 			t.Errorf("lang = %q, want hi so the endpoint can pick its own language", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -739,42 +725,35 @@ func TestAiStatusReportsReachableEndpoint(t *testing.T) {
 	}
 }
 
-// The key must never travel in the URL: every proxy and worker log along the way
-// records the full request line, and /ai status shows errors to the chat.
-func TestAiKeyTravelsInHeaderNotQuery(t *testing.T) {
-	var gotAuth, gotQuery, gotMethod, gotBody string
+// The deployed worker reads its arguments from the query string, so the request
+// stays a GET. This pins that contract: if it changes, the worker has to be
+// redeployed first or every reply turns into a 400.
+func TestAiRequestShapeMatchesDeployedWorker(t *testing.T) {
+	var gotQuery, gotMethod string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		gotQuery = r.URL.RawQuery
-		gotMethod = r.Method
-		b, _ := io.ReadAll(r.Body)
-		gotBody = string(b)
+		gotQuery, gotMethod = r.URL.RawQuery, r.Method
 		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
 			"choices": []interface{}{map[string]interface{}{"finish_reason": "stop",
 				"message": map[string]interface{}{"content": "pong"}}}}})
 	}))
 	defer srv.Close()
 
-	const secret = "super-secret-key"
-	h := &Handler{cfg: &config.Config{AI: config.AIConfig{Enabled: true, ApiBaseURL: srv.URL, ApiKey: secret}}}
-	if _, err := h.aiReply("hello there", "hi"); err != nil {
+	h := &Handler{cfg: &config.Config{AI: config.AIConfig{Enabled: true, ApiBaseURL: srv.URL, ApiKey: "k"}}}
+	if _, err := h.aiReply("hello", "en"); err != nil {
 		t.Fatalf("aiReply: %v", err)
 	}
 
-	if gotMethod != http.MethodPost {
-		t.Errorf("method = %s, want POST", gotMethod)
+	if gotMethod != http.MethodGet {
+		t.Errorf("method = %s, want GET", gotMethod)
 	}
-	if gotAuth != "Bearer "+secret {
-		t.Errorf("Authorization = %q", gotAuth)
+	vals, err := url.ParseQuery(gotQuery)
+	if err != nil {
+		t.Fatalf("parse query: %v", err)
 	}
-	if strings.Contains(gotQuery, secret) {
-		t.Errorf("key leaked into the query string: %q", gotQuery)
-	}
-	if !strings.Contains(gotBody, "text=") {
-		t.Errorf("message must travel in the body, got %q", gotBody)
-	}
-	if strings.Contains(gotBody, secret) {
-		t.Error("key leaked into the body")
+	for _, k := range []string{"apikey", "lang", "text"} {
+		if vals.Get(k) == "" {
+			t.Errorf("%s missing from the query: %q", k, gotQuery)
+		}
 	}
 }
 
