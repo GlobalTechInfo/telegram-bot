@@ -31,19 +31,48 @@ func MainMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-func Settings(lang string, notificationsOn bool) tgbotapi.InlineKeyboardMarkup {
+func Settings(lang string, notificationsOn, aiOn bool, aiName string) tgbotapi.InlineKeyboardMarkup {
 	notifLabel := localization.Get("notifications", lang)
 	if notificationsOn {
 		notifLabel = "🔔 " + localization.Get("notifications", lang) + " [ON]"
 	} else {
 		notifLabel = "🔕 " + localization.Get("notifications", lang) + " [OFF]"
 	}
+
+	aiLabel := localization.Get("aiToggle", lang)
+	if aiOn {
+		aiLabel = "🦑 " + aiName + " [ON]"
+	} else {
+		aiLabel = "🦑 " + aiName + " [OFF]"
+	}
+
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("language", lang), "settings_language"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(notifLabel, "settings_notifications"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(aiLabel, "settings_ai"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+		),
+	)
+}
+
+// SettingsAI offers the AI toggle, mirroring SettingsNotifications.
+func SettingsAI(lang string, current bool, aiName string) tgbotapi.InlineKeyboardMarkup {
+	label := "🔕 " + localization.Get("aiOff", lang)
+	action := "ai_off"
+	if !current {
+		label = "🔔 " + localization.Get("aiOn", lang)
+		action = "ai_on"
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, action),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
@@ -126,119 +155,6 @@ func Back(lang string) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
 		),
 	)
-}
-
-func YtFormatPicker(lang string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytFormatMp3", lang), "yt_fmt:mp3"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytFormat360", lang), "yt_fmt:360"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytFormat720", lang), "yt_fmt:720"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytFormat1080", lang), "yt_fmt:1080"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-		),
-	)
-}
-
-func TtFormatPicker(lang string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttFormatWM", lang), "tt_fmt:wm"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttFormatNoWM", lang), "tt_fmt:nowm"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttFormatHD", lang), "tt_fmt:nowm_hd"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttFormatMusic", lang), "tt_fmt:music"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-		),
-	)
-}
-
-func FbQualityPicker(qualities []interface{}, lang string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-
-	for i, q := range qualities {
-		item, ok := q.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		label, _ := item["quality"].(string)
-		if label == "" {
-			label = fmt.Sprintf("Quality %d", i)
-		}
-
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("fb_fmt:%d", i)))
-		if len(row) >= 2 {
-			rows = append(rows, row)
-			row = nil
-		}
-	}
-	if len(row) > 0 {
-		rows = append(rows, row)
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-	))
-
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
-}
-
-func SnapPicker(count int, lang string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-
-	for i := 0; i < count; i++ {
-		label := fmt.Sprintf("👻 Snap %d", i+1)
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("sc_fmt:%d", i)))
-		if len(row) >= 2 {
-			rows = append(rows, row)
-			row = nil
-		}
-	}
-	if len(row) > 0 {
-		rows = append(rows, row)
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-	))
-
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
-}
-
-func MediaPicker(count int, label string, prefix string, lang string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	var row []tgbotapi.InlineKeyboardButton
-
-	for i := 0; i < count; i++ {
-		btnLabel := fmt.Sprintf("%s %s %d", label, prefix, i+1)
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(btnLabel, fmt.Sprintf("%s_fmt:%d", prefix, i)))
-		if len(row) >= 2 {
-			rows = append(rows, row)
-			row = nil
-		}
-	}
-	if len(row) > 0 {
-		rows = append(rows, row)
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-	))
-
-	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 func BingModePicker(lang string) tgbotapi.InlineKeyboardMarkup {
@@ -537,25 +453,85 @@ func TranslateLangPicker(lang string) tgbotapi.InlineKeyboardMarkup {
 }
 
 // DownloadMenu collects every media downloader behind one button.
-func DownloadMenu(lang string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ytMenu", lang), "dl_yt"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("igMenu", lang), "dl_ig"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("ttMenu", lang), "dl_tt"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("fbMenu", lang), "dl_fb"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("pinMenu", lang), "dl_pin"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("scMenu", lang), "dl_sc"),
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("twMenu", lang), "dl_tw"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-		),
-	)
+// DownloadPicker renders one button per label, two per row, all sharing the
+// <prefix>_fmt:<index> callback convention.
+func DownloadPicker(prefix string, labels []string, lang string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+
+	for i, label := range labels {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s_fmt:%d", prefix, i)))
+		if len(row) >= 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// DownloadFormatPicker renders a fixed format list, where the callback carries
+// the format value itself rather than an index.
+func DownloadFormatPicker(prefix string, labels []string, values []string, lang string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+
+	for i, label := range labels {
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s_fmt:%s", prefix, values[i])))
+		if len(row) >= 2 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// DownloadEntry is one downloader button, supplied by the handler so the
+// registry stays in the handlers package.
+type DownloadEntry struct {
+	ID      string
+	Label   string
+	Enabled bool
+}
+
+func DownloadMenu(entries []DownloadEntry, lang string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var row []tgbotapi.InlineKeyboardButton
+
+	for _, e := range entries {
+		if !e.Enabled {
+			continue
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(e.Label, "dl_"+e.ID))
+		if len(row) >= 3 {
+			rows = append(rows, row)
+			row = nil
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // CreateMenu collects the image/text generators.

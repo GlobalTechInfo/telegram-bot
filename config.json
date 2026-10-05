@@ -70,6 +70,42 @@
       "enabled": true,
       "description": "Download Twitter/X posts"
     },
+    "imdb": {
+      "enabled": true,
+      "description": "Download IMDb trailers and media"
+    },
+    "ai": {
+      "enabled": true,
+      "description": "Chat with Kraken, the AI agent"
+    },
+    "capcut": {
+      "enabled": true,
+      "description": "Download CapCut templates and videos"
+    },
+    "alamy": {
+      "enabled": true,
+      "description": "Download Alamy stock media"
+    },
+    "istock": {
+      "enabled": true,
+      "description": "Download iStock media"
+    },
+    "vidsplay": {
+      "enabled": true,
+      "description": "Download Vidsplay stock videos"
+    },
+    "odysee": {
+      "enabled": true,
+      "description": "Download Odysee videos"
+    },
+    "gh": {
+      "enabled": true,
+      "description": "Download a public GitHub repository as a zip"
+    },
+    "threads": {
+      "enabled": true,
+      "description": "Download Threads posts"
+    },
     "bing": {
       "enabled": true,
       "description": "Search the web or find images"
@@ -269,6 +305,15 @@
   },
   "apiBaseUrl": "https://api.qasimdev.dpdns.org/api",
   "apiKey": "qasim-dev",
+  "ai": {
+    "enabled": true,
+    "name": "Kraken",
+    "owner": "Qasim",
+    "apiBaseUrl": "https://mistral.stacktoy.workers.dev",
+    "apiKey": "",
+    "maxInputChars": 2000,
+    "cooldownSeconds": 3
+  },
   "ui": {
     "prefix": "🤖 My Modern Bot",
     "mainMenu": {

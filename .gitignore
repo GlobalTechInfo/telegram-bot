@@ -7,6 +7,8 @@ telegram-bot
 *.db-shm
 *.db-wal
 bot-data/
+# Default DB_PATH for `go run main.go`; the session store lands here.
+data/
 
 # secrets
 .env
@@ -15,5 +17,5 @@ bot-data/
 # logs
 *.log
 
-# test files are local-only, never published
-*_test.go
+# Test files are tracked. They are the only guard on the download registry, the
+# reply cleanup and the agent wiring, so they belong in the repository.
