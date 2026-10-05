@@ -46,11 +46,8 @@ The key is read from the environment only; `config.json` ships with an empty
 `ai.apiKey` so no secret is committed. Without `AI_KEY` the agent stays silent
 and everything else keeps working.
 
-The endpoint's source is `worker/index.ts`, a Cloudflare Worker that holds the
-persona in a system prompt and accepts `?apikey=&lang=&text=`. It answers with
-`data.choices[0].message.content` wrapped in `{status, creator, data}`; the bot
-depends on that shape. Run `/ai status` in Telegram to confirm the endpoint is
-reachable and report which variable is missing when it is not.
+Run `/ai status` in Telegram to confirm the endpoint is reachable; it reports
+which setting is missing when it is not.
 
 ### 📥 Media Downloaders
 | Platform | Formats |
@@ -65,9 +62,9 @@ reachable and report which variable is missing when it is not.
 | **Threads** | Posts and carousels |
 | **GitHub** | Public repository as a zip (`/gh`, link must be `owner/repo`) |
 | **Vidsplay** | Stock video clips |
-| **Odysee** | Video posts (the API often returns only the poster) |
+| **Odysee** | Video posts |
 | **iStock / Alamy** | Stock photos |
-| **CapCut** | Template clips (`template-detail` links only; the API returns nothing for other CapCut URLs yet) |
+| **CapCut** | Template clips |
 | **IMDb** | Trailers |
 
 A pasted link from any of these sites starts the download on its own. GitHub is the

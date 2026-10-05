@@ -200,17 +200,17 @@ Rules the engine enforces, all of which were bugs once:
 Registered sites: `yt`, `ig`, `tt`, `fb`, `pin`, `sc`, `tw`, `threads`, `gh`,
 `vidsplay`, `odysee`, `istock`, `alamy`, `capcut`, `imdb` (15).
 
-Endpoint notes, verified against the API:
+Response shapes, as consumed by the engine:
 
-| Site | Endpoint | Notes |
-|------|----------|-------|
-| `threads` | `/thrdown/download` | `data.title` is the post caption and `data.video` the media, on both `threads.net` and `threads.com`; `/threads/download` 500s on every URL |
-| `odysee` | `/download/odysee` | `data.result[]` of `{video, image}`; often returns an empty `video` with only a poster, and intermittently 503s upstream |
-| `gh` | `/gitclone/download` | `data.url` is an `api.github.com/.../zipball`; only `owner/repo` is accepted |
+| Site | Endpoint | Payload |
+|------|----------|---------|
+| `threads` | `/thrdown/download` | `data.title` caption, `data.video` media |
+| `odysee` | `/download/odysee` | `data.result[]` of `{video, image}` |
+| `gh` | `/gitclone/download` | `data.url` zipball |
 | `vidsplay` | `/download/vidsplay` | `data.result[]` of `{video, image}` |
-| `istock` | `/download/istock` | `data.result` is a single object, not a list |
-| `alamy` | `/download/alamy` | `data.result` is a list |
-| `capcut` | `/capdown/download` | only accepts `template-detail/...`; `/capcut/download` answers "Invalid CapCut URL" for those, and the working path still returns `success` with no `data` |
+| `istock` | `/download/istock` | `data.result`, a single object |
+| `alamy` | `/download/alamy` | `data.result`, a list |
+| `capcut` | `/capdown/download` | `template-detail` links only |
 | `imdb` | `/download/imdb` | `data.result[]` of `{image, video_hd, video_sd}` |
 
 ## Download Infrastructure
