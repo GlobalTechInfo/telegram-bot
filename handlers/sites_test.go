@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1173,5 +1174,60 @@ func TestFirstOfEachKind(t *testing.T) {
 	}
 	if n := len(firstOfEachKind(nil)); n != 0 {
 		t.Errorf("nothing in, nothing out, got %d", n)
+	}
+}
+
+// apiJSON returns whatever the endpoint sent, so a body of null, [] or a bare
+// string arrives with no error at all. A single-value type assertion on any of
+// them panics, and these run in a goroutine with no recover.
+func TestApiFailedSurvivesNonObjectResponses(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantFail  bool
+		wantIsObj bool
+	}{
+		{"success true", `{"success":true,"data":{"url":"https://x.test/a.mp4"}}`, false, true},
+		{"success false", `{"success":false,"error":"nope"}`, true, true},
+		{"no flag at all", `{"data":{"url":"https://x.test/a.mp4"}}`, false, true},
+		{"json null", `null`, true, false},
+		{"json array", `[]`, true, false},
+		{"bare string", `"hello"`, true, false},
+		{"json number", `42`, true, false},
+		{"json false", `false`, true, false},
+	}
+	for _, c := range cases {
+		var v interface{}
+		if err := json.Unmarshal([]byte(c.body), &v); err != nil {
+			t.Fatal(err)
+		}
+		failed, isObject := apiFailed(v)
+		if failed != c.wantFail || isObject != c.wantIsObj {
+			t.Errorf("%s: apiFailed = (%v, %v), want (%v, %v)", c.name, failed, isObject, c.wantFail, c.wantIsObj)
+		}
+	}
+}
+
+// The end-to-end version: a malformed body must produce an error message, not a
+// panic that takes the process down.
+func TestMalformedApiResponseDoesNotPanic(t *testing.T) {
+	for _, body := range []string{"null", "[]", `"oops"`, "42"} {
+		t.Run(body, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			api := &stubAPI{responders: map[string][]string{
+				"getMe": {okMe}, "sendMessage": {`{"ok":true,"result":{}}`},
+			}}
+			h := igHandler(t, api, srv.URL)
+			h.resolveDownload(mustDLByID(t, "ig"), -1001, -1001, "https://instagram.com/p/x/", "", "en")
+
+			if len(api.callsFor("sendMessage")) == 0 {
+				t.Error("the user should be told the download failed")
+			}
+		})
 	}
 }

@@ -188,7 +188,10 @@ var downloaders = []downloader{
 			sess := h.store.GetOrCreate(uid)
 			ttData, _ := sess.Data["tt_api_data"].(map[string]interface{})
 			h.store.ClearSessionData(uid)
-			go h.downloadTikTok(chatID, uid, ttData, sel, lang)
+			go func() {
+				defer h.recoverPanic()
+				h.downloadTikTok(chatID, uid, ttData, sel, lang)
+			}()
 		},
 		info: func(h *Handler, chatID, uid int64, d downloader, mediaURL, lang string) {
 			h.sendMsg(chatID, dlText(d, "Working", lang), keyboards.Back(lang))
@@ -438,7 +441,12 @@ func (h *Handler) handleDownloadURL(d downloader, chatID, uid int64, mediaURL, l
 			keyboards.DownloadFormatPicker(d.id, dlLabelTexts(d, lang), dlLabelValues(d), lang))
 	default:
 		h.sendMsg(chatID, dlText(d, "Working", lang), keyboards.Back(lang))
-		go h.resolveDownload(d, chatID, uid, mediaURL, "", lang)
+		go func() {
+			// This runs outside the per-update goroutine's recover, so a panic
+			// here would take the process down rather than one update.
+			defer h.recoverPanic()
+			h.resolveDownload(d, chatID, uid, mediaURL, "", lang)
+		}()
 	}
 }
 
@@ -576,6 +584,27 @@ func contains(list []string, s string) bool {
 
 // resolveDownload calls the endpoint and either delivers the media or shows a
 // picker. sel is empty on the first pass and the picker's value afterwards.
+// apiFailed reads the success flag without panicking on a response that is not a
+// JSON object. apiJSON returns whatever the endpoint sent, so null, [] and a bare
+// string all arrive with no error, and a single-value type assertion on any of
+// them panics. That panic was in a goroutine with no recover, so a malformed
+// response from a third party could take the whole process down.
+//
+// The second return says whether the body was an object at all, which separates
+// "the endpoint refused" from "the endpoint sent something else".
+func apiFailed(v interface{}) (failed, isObject bool) {
+	obj, isObject := v.(map[string]interface{})
+	if !isObject {
+		return true, false
+	}
+	flag, ok := obj["success"].(bool)
+	if !ok {
+		return false, true
+	}
+	return !flag, true
+}
+
+// handleDownloadURL drives a download from a pasted or commanded URL.
 // resolveVariants makes one request per registered variant and delivers
 // everything they return as one post.
 //
@@ -602,8 +631,12 @@ func (h *Handler) resolveVariants(d downloader, chatID int64, mediaURL, sel, lan
 			log.Printf("%s variant %v failed: %v", d.id, extra, err)
 			continue
 		}
-		if ok, _ := v.(map[string]interface{})["success"].(bool); ok == false {
-			log.Printf("%s variant %v returned success=false: %s", d.id, extra, apiReason(v))
+		if failed, isObject := apiFailed(v); failed {
+			if isObject {
+				log.Printf("%s variant %v returned success=false: %s", d.id, extra, apiReason(v))
+			} else {
+				log.Printf("%s variant %v returned %T instead of an object", d.id, extra, v)
+			}
 			continue
 		}
 		if caption == "" {
@@ -674,8 +707,12 @@ func (h *Handler) resolveDownload(d downloader, chatID, uid int64, mediaURL, sel
 		h.sendMsg(chatID, dlText(d, "Error", lang), keyboards.Back(lang))
 		return
 	}
-	if ok, _ := v.(map[string]interface{})["success"].(bool); ok == false {
-		log.Printf("%s API returned success=false: %s", d.id, apiReason(v))
+	if failed, isObject := apiFailed(v); failed {
+		if isObject {
+			log.Printf("%s API returned success=false: %s", d.id, apiReason(v))
+		} else {
+			log.Printf("%s API returned %T instead of a JSON object", d.id, v)
+		}
 		h.sendMsg(chatID, dlText(d, "Error", lang), keyboards.Back(lang))
 		return
 	}
@@ -1164,7 +1201,10 @@ func (h *Handler) handleDownloadPick(d downloader, chatID, uid int64, sel string
 			h.sendMsg(chatID, dlText(d, "Error", lang), keyboards.Back(lang))
 			return
 		}
-		go h.resolveDownload(d, chatID, uid, mediaURL, sel, lang)
+		go func() {
+			defer h.recoverPanic()
+			h.resolveDownload(d, chatID, uid, mediaURL, sel, lang)
+		}()
 		return
 	}
 

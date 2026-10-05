@@ -1,9 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,13 +133,26 @@ func TestAiPromptKeepsMessageLast(t *testing.T) {
 
 func TestAiReplyParsesEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("apikey") != "TESTKEY" {
-			t.Errorf("apikey not sent, got %q", r.URL.Query().Get("apikey"))
+		// The key is a header and the message is a body: anything in the query
+		// string is recorded by every proxy and log on the way.
+		if got := r.Header.Get("Authorization"); got != "Bearer TESTKEY" {
+			t.Errorf("Authorization = %q, want the key as a bearer token", got)
 		}
-		if r.URL.Query().Get("text") == "" {
+		if strings.Contains(r.URL.RawQuery, "TESTKEY") {
+			t.Errorf("key reached the query string: %q", r.URL.RawQuery)
+		}
+		form, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		vals, err := url.ParseQuery(string(form))
+		if err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		if vals.Get("text") == "" {
 			t.Error("text not sent")
 		}
-		if got := r.URL.Query().Get("lang"); got != "hi" {
+		if got := vals.Get("lang"); got != "hi" {
 			t.Errorf("lang = %q, want hi so the endpoint can pick its own language", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -718,5 +736,87 @@ func TestAiStatusReportsReachableEndpoint(t *testing.T) {
 	}
 	if strings.Contains(text, "secret-key") {
 		t.Error("status must never echo key material")
+	}
+}
+
+// The key must never travel in the URL: every proxy and worker log along the way
+// records the full request line, and /ai status shows errors to the chat.
+func TestAiKeyTravelsInHeaderNotQuery(t *testing.T) {
+	var gotAuth, gotQuery, gotMethod, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotQuery = r.URL.RawQuery
+		gotMethod = r.Method
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{
+			"choices": []interface{}{map[string]interface{}{"finish_reason": "stop",
+				"message": map[string]interface{}{"content": "pong"}}}}})
+	}))
+	defer srv.Close()
+
+	const secret = "super-secret-key"
+	h := &Handler{cfg: &config.Config{AI: config.AIConfig{Enabled: true, ApiBaseURL: srv.URL, ApiKey: secret}}}
+	if _, err := h.aiReply("hello there", "hi"); err != nil {
+		t.Fatalf("aiReply: %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %s, want POST", gotMethod)
+	}
+	if gotAuth != "Bearer "+secret {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if strings.Contains(gotQuery, secret) {
+		t.Errorf("key leaked into the query string: %q", gotQuery)
+	}
+	if !strings.Contains(gotBody, "text=") {
+		t.Errorf("message must travel in the body, got %q", gotBody)
+	}
+	if strings.Contains(gotBody, secret) {
+		t.Error("key leaked into the body")
+	}
+}
+
+func TestSafeErrHidesUrlAndKey(t *testing.T) {
+	const secret = "super-secret-key"
+
+	urlErr := &url.Error{Op: "Post", URL: "https://ai.test/?apikey=" + secret,
+		Err: errors.New("dial tcp: i/o timeout")}
+	got := safeErr(urlErr, secret)
+	if strings.Contains(got, secret) {
+		t.Errorf("key survived: %q", got)
+	}
+	if strings.Contains(got, "ai.test") {
+		t.Errorf("URL survived: %q", got)
+	}
+	if !strings.Contains(got, "i/o timeout") {
+		t.Errorf("the cause should remain: %q", got)
+	}
+
+	plain := safeErr(errors.New("agent endpoint returned status 401"), secret)
+	if plain != "agent endpoint returned status 401" {
+		t.Errorf("plain error changed: %q", plain)
+	}
+}
+
+// A transport error must not put the key in the log either.
+func TestAiErrorLogHasNoKey(t *testing.T) {
+	const secret = "super-secret-key"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	base := srv.URL
+	srv.Close() // nothing is listening, so the request fails
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	h := &Handler{cfg: &config.Config{AI: config.AIConfig{Enabled: true, ApiBaseURL: base, ApiKey: secret}}}
+	_, err := h.aiReply("hi", "en")
+	if err == nil {
+		t.Fatal("expected an error against a closed server")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("error carries the key: %q", err.Error())
 	}
 }

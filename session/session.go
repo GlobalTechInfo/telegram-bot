@@ -144,9 +144,12 @@ func NewStore(dbPath string) *Store {
 		// off to chmod a directory that was fine while a second copy of the bot
 		// held the file.
 		if errors.Is(err, bbolt.ErrTimeout) {
+			// Deliberately no advice to delete the file: it holds every session,
+			// and a stale lock is cleared by stopping the process holding it, not
+			// by removing the data.
 			log.Fatalf("❌ Database %s is locked by another running instance. "+
-				"Stop it first; if no bot is running, an earlier process died holding the lock "+
-				"and %s can be deleted", dbPath, dbPath)
+				"Stop that instance and start this one again. Deleting the file will not help: "+
+				"it discards every stored session.", dbPath)
 		}
 		log.Fatalf("❌ Failed to open database %s (is the directory %s writable?): %v", dbPath, filepath.Dir(dbPath), err)
 	}
@@ -201,7 +204,21 @@ func (s *Store) GetOrCreate(userID int64) *SessionData {
 		return sess
 	}
 
-	if err := s.saveSession(userID, sess); err != nil {
+	// Two updates for the same brand new user can both read "missing" above, and
+	// the one that finishes last would overwrite whatever the other had already
+	// stored, losing the state it had set. The existence check is repeated inside
+	// the write transaction, so only the first of them creates the session.
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("sessions"))
+		if b.Get(itob(userID)) != nil {
+			return nil
+		}
+		encoded, err := json.Marshal(sess)
+		if err != nil {
+			return err
+		}
+		return b.Put(itob(userID), encoded)
+	}); err != nil {
 		log.Printf("session create error: %v", err)
 	}
 	return sess

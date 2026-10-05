@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -55,6 +56,52 @@ func aiPrompt(lang, text string) string {
 	return fmt.Sprintf("Reply in %s.\n\n%s", localization.LanguageName(lang), text)
 }
 
+// aiPost sends one request to the agent.
+//
+// The key travels as an Authorization header and the message as a form-encoded
+// body. Both used to go in the query string, where every proxy, load balancer and
+// worker log between here and the endpoint records the full URL, so the key and
+// the user's private message ended up in logs all along the way.
+func (h *Handler) aiPost(base, key string, form url.Values) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodPost, base, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	resp, err := aiClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("agent endpoint returned status %d", resp.StatusCode)
+	}
+	return readBody(resp, maxAPISize)
+}
+
+// safeErr renders an error for a log line or a chat message without leaking the
+// request URL or the key. A *url.Error carries the URL it failed to fetch, and
+// the key used to be part of it; /ai status also shows errors to whoever is in
+// the chat, which in a group means everyone.
+func safeErr(err error, key string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		// The wrapped error names the cause; the outer one names the URL.
+		msg = ue.Err.Error()
+	}
+	if key != "" {
+		msg = strings.ReplaceAll(msg, key, "***")
+	}
+	return msg
+}
+
 // aiReply asks the agent and returns its cleaned answer.
 func (h *Handler) aiReply(text, lang string) (string, error) {
 	base := h.cfg.EffectiveAiBaseURL()
@@ -70,27 +117,14 @@ func (h *Handler) aiReply(text, lang string) (string, error) {
 		text = string(r[:maxChars])
 	}
 
-	sep := "?"
-	if strings.Contains(base, "?") {
-		sep = "&"
-	}
-	endpoint := base + sep + "apikey=" + url.QueryEscape(key) +
-		"&lang=" + url.QueryEscape(lang) +
-		"&text=" + url.QueryEscape(aiPrompt(lang, text))
-
-	resp, err := aiClient.Get(endpoint)
+	raw, err := h.aiPost(base, key, url.Values{
+		"lang": []string{lang},
+		"text": []string{aiPrompt(lang, text)},
+	})
 	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("agent endpoint returned status %d", resp.StatusCode)
-	}
-
-	raw, err := readBody(resp, maxAPISize)
-	if err != nil {
-		return "", err
+		// safeErr keeps the key and the message out of the log and out of the
+		// chat: a transport error embeds the full request URL.
+		return "", errors.New(safeErr(err, key))
 	}
 
 	var env aiEnvelope
@@ -350,7 +384,7 @@ func (h *Handler) maybeChatWithAI(chat *tgbotapi.Chat, user *tgbotapi.User, msg 
 
 		reply, err := h.aiReply(text, lang)
 		if err != nil {
-			log.Printf("ai error: %v", err)
+			log.Printf("ai error: %s", safeErr(err, h.cfg.EffectiveAiKey()))
 			h.sendPlain(chatID, localization.Get("aiError", lang))
 			return
 		}
@@ -463,7 +497,10 @@ func (h *Handler) cmdAIStatus(chatID int64, lang string) {
 
 	reply, err := h.aiReply("Reply with the single word: pong", lang)
 	if err != nil {
-		h.sendPlain(chatID, localization.Get("aiStatus", lang, host, masked, "FAILED: "+err.Error()))
+		// Sanitised: this text goes to the chat, so a group would otherwise see
+		// the request URL and the key.
+		h.sendPlain(chatID, localization.Get("aiStatus", lang, host, masked,
+			"FAILED: "+safeErr(err, key)))
 		return
 	}
 	h.sendPlain(chatID, localization.Get("aiStatus", lang, host, masked, reply))

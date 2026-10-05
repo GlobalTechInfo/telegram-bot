@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -90,5 +91,34 @@ func TestResolveDBPathLeavesRelativePathsAlone(t *testing.T) {
 	}
 	if got := resolveDBPath("./bot.db"); got != "./bot.db" {
 		t.Errorf("got %q", got)
+	}
+}
+
+// Two updates for the same new user can both observe the session as missing. The
+// second one must not overwrite state the first already stored.
+func TestGetOrCreateDoesNotClobberConcurrentCreation(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		store := NewStore(filepath.Join(t.TempDir(), "race.db"))
+		id := int64(9000 + i)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			sess := store.GetOrCreate(id)
+			sess.Data["state_saved"] = true
+			store.saveSession(id, sess)
+		}()
+		go func() {
+			defer wg.Done()
+			store.GetOrCreate(id) // the default-session write that used to win
+		}()
+		wg.Wait()
+
+		sess := store.GetOrCreate(id)
+		if sess.Data["state_saved"] != true {
+			t.Fatalf("iteration %d: the default session write erased stored state", i)
+		}
+		store.Close()
 	}
 }
