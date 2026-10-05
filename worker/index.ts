@@ -36,43 +36,14 @@ function systemPrompt(language: string): string {
   ].join(" ");
 }
 
-// readRequest pulls the key, the message and the language out of a request.
-//
-// The key arrives as an Authorization header and the message as a form-encoded
-// body. Putting either in the query string meant every proxy and log line between
-// the bot and here recorded both, and the user's private message with them. GET is
-// still accepted so an older build keeps working; it is only a compatibility path.
-async function readRequest(request: Request): Promise<{
-  apiKey: string;
-  text: string;
-  lang: string;
-}> {
-  const bearer = (request.headers.get("Authorization") || "").trim();
-  const headerKey = /^bearer\s+(.+)$/i.exec(bearer)?.[1]?.trim() || "";
-
-  if (request.method === "POST") {
-    const form = await request.formData();
-    const key = headerKey || String(form.get("apikey") || "");
-    return {
-      apiKey: key,
-      text: String(form.get("text") || "").trim(),
-      lang: String(form.get("lang") || "").toLowerCase(),
-    };
-  }
-
-  const url = new URL(request.url);
-  return {
-    apiKey: headerKey || url.searchParams.get("apikey") || "",
-    text: (url.searchParams.get("text") || "").trim(),
-    lang: (url.searchParams.get("lang") || "").toLowerCase(),
-  };
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const validApiKeys = ["Suhail", "Guru", "Zubair"];
 
-    const { apiKey, text: userContent, lang } = await readRequest(request);
+    const url = new URL(request.url);
+    const apiKey = url.searchParams.get("apikey");
+    const userContent = url.searchParams.get("text")?.trim();
+    const lang = (url.searchParams.get("lang") || "").toLowerCase();
 
     if (!apiKey) {
       return new Response("API key missing. Please provide an API key.", { status: 400 });
