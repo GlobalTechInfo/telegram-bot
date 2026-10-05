@@ -7,9 +7,11 @@ import (
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
-	"runtime"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,14 +25,29 @@ import (
 )
 
 const maxDownloadSize = 100 << 20 // 100 MB max per download
+const maxAPISize = 8 << 20        // 8 MB max for JSON API responses
 const maxConcurrentDownloads = 2
+
+// Instagram carousel delivery: albums of 10 (Telegram's cap), at most 50 items
+// per post, and never more than 40MB of images held for one album.
+const igMaxItems = 50
+const igAlbumSize = 10
+const igAlbumMaxBytes = 40 << 20
+const igAlbumPause = 700 * time.Millisecond
+
+// Telegram deletes at most 100 messages per call and throttles bulk deletes to
+// roughly 30 per second in groups, so batches stay small and paced.
+const delBatchMax = 100
+const delBatchSize = 20
+const delBatchRetries = 3
+const delBatchPause = 1200 * time.Millisecond
+const delSinglePause = 90 * time.Millisecond
 
 type Handler struct {
 	bot    *tgbotapi.BotAPI
 	cfg    *config.Config
 	store  *session.Store
 	dlSem  chan struct{}
-	httpc  *http.Client
 	token  string
 	selfID int64
 }
@@ -45,7 +62,6 @@ func New(bot *tgbotapi.BotAPI, cfg *config.Config, store *session.Store, token s
 		cfg:    cfg,
 		store:  store,
 		dlSem:  make(chan struct{}, maxConcurrentDownloads),
-		httpc:  &http.Client{Timeout: 60 * time.Second},
 		selfID: selfID,
 		token:  token,
 	}
@@ -53,12 +69,50 @@ func New(bot *tgbotapi.BotAPI, cfg *config.Config, store *session.Store, token s
 
 var emptyKB tgbotapi.InlineKeyboardMarkup
 
+// One client for every outbound request. The stdlib default has no timeout at
+// all, so a single stalled CDN connection used to pin a goroutine and a
+// download slot forever.
+var mediaClient = &http.Client{
+	Timeout: 180 * time.Second,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 20 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       60 * time.Second,
+	},
+}
+
+// readBody reads at most limit bytes, failing early when Content-Length already
+// exceeds it. Pre-allocating from the header avoids the repeated doubling that
+// io.ReadAll does on the way to a 100MB buffer.
+func readBody(resp *http.Response, limit int) ([]byte, error) {
+	if resp.ContentLength > int64(limit) {
+		return nil, fmt.Errorf("response too large (%d bytes, limit %d)", resp.ContentLength, limit)
+	}
+	var buf bytes.Buffer
+	if resp.ContentLength > 0 {
+		buf.Grow(int(resp.ContentLength))
+	}
+	n, err := io.CopyN(&buf, resp.Body, int64(limit)+1)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if n > int64(limit) {
+		return nil, fmt.Errorf("response too large (>%d bytes)", limit)
+	}
+	return buf.Bytes(), nil
+}
+
 func (h *Handler) apiGet(apiURL string) ([]byte, error) {
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := h.httpc.Do(req)
+	resp, err := mediaClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -66,16 +120,16 @@ func (h *Handler) apiGet(apiURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize))
+	return readBody(resp, maxDownloadSize)
 }
 
 func (h *Handler) downloadFile(f tgbotapi.File) ([]byte, error) {
-	resp, err := h.httpc.Get(f.Link(h.token))
+	resp, err := mediaClient.Get(f.Link(h.token))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(io.LimitReader(resp.Body, maxDownloadSize))
+	return readBody(resp, maxDownloadSize)
 }
 
 func (h *Handler) recoverPanic() {
@@ -206,7 +260,8 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 	case "help":
 		h.sendMsg(chat.ID, localization.Get("help", lang), keyboards.Back(lang))
 	case "settings":
-		h.sendMsg(chat.ID, localization.Get("settings", lang), keyboards.Settings(lang, h.notifState(uid)))
+		h.sendMsg(chat.ID, localization.Get("settings", lang),
+			keyboards.Settings(lang, h.notifState(uid), h.aiStateForChat(chat), h.cfg.AiName()))
 	case "profile":
 		msg := localization.Get("profile", lang, user.ID, user.FirstName+" "+user.LastName, lang, h.formatTime(sess.JoinedAt))
 		h.sendMsg(chat.ID, msg, keyboards.Back(lang))
@@ -221,34 +276,6 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		h.store.SetState(uid, "awaiting_poll_question")
 		h.store.SetSessionData(uid, make(map[string]interface{}))
 		h.sendMsg(chat.ID, localization.Get("pollQuestion", lang), keyboards.Back(lang))
-	case "yt", "download":
-		h.store.SetState(uid, "awaiting_yt_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("ytPrompt", lang), keyboards.Back(lang))
-	case "ig", "instagram":
-		h.store.SetState(uid, "awaiting_ig_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("igPrompt", lang), keyboards.Back(lang))
-	case "tt", "tiktok":
-		h.store.SetState(uid, "awaiting_tt_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("ttPrompt", lang), keyboards.Back(lang))
-	case "fb", "facebook":
-		h.store.SetState(uid, "awaiting_fb_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("fbPrompt", lang), keyboards.Back(lang))
-	case "pin", "pinterest":
-		h.store.SetState(uid, "awaiting_pin_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("pinPrompt", lang), keyboards.Back(lang))
-	case "sc", "snapchat":
-		h.store.SetState(uid, "awaiting_sc_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("scPrompt", lang), keyboards.Back(lang))
-	case "tw", "twitter":
-		h.store.SetState(uid, "awaiting_tw_url")
-		h.store.SetSessionData(uid, make(map[string]interface{}))
-		h.sendMsg(chat.ID, localization.Get("twPrompt", lang), keyboards.Back(lang))
 	case "bing":
 		h.sendMsg(chat.ID, localization.Get("bingPrompt", lang), keyboards.BingModePicker(lang))
 	case "search":
@@ -300,6 +327,8 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		case "demote", "admin_remove":
 			h.cmdDemote(chat, user, update.Message, lang)
 		}
+	case "ai":
+		h.cmdAI(chat, user, update.Message, lang)
 	case "del", "purge":
 		h.cmdDel(chat, user, lang)
 	case "invite", "link":
@@ -353,8 +382,28 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		)
 		h.sendMsg(chat.ID, msg, kb)
 	default:
+		if d, ok := dlByCmd(cmd); ok {
+			h.store.SetState(uid, dlState(d.id))
+			h.store.SetSessionData(uid, make(map[string]interface{}))
+			h.sendMsg(chat.ID, dlText(d, "Prompt", lang), keyboards.Back(lang))
+			return
+		}
 		h.sendMsg(chat.ID, localization.Get("unknownCommand", lang), keyboards.Back(lang))
 	}
+}
+
+// downloadMenu lists every enabled downloader, preferring its translated button
+// label when one exists.
+func (h *Handler) downloadMenu(lang string) tgbotapi.InlineKeyboardMarkup {
+	entries := make([]keyboards.DownloadEntry, 0, len(downloaders))
+	for _, d := range downloaders {
+		label := d.name
+		if localization.Has(d.id+"Menu", lang) {
+			label = localization.Get(d.id+"Menu", lang)
+		}
+		entries = append(entries, keyboards.DownloadEntry{ID: d.id, Label: label, Enabled: h.cfg.IsCommandEnabled(d.id)})
+	}
+	return keyboards.DownloadMenu(entries, lang)
 }
 
 func (h *Handler) HandleCallback(update tgbotapi.Update) {
@@ -385,7 +434,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 	case data == "settings":
 		h.answerCb(cb.ID, "")
 		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
-			keyboards.Settings(sess.Language, h.notifState(uid)))
+			keyboards.Settings(sess.Language, h.notifState(uid), h.aiStateForChat(chat), h.cfg.AiName()))
 
 	case data == "settings_language":
 		h.answerCb(cb.ID, "")
@@ -402,17 +451,34 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.editMsg(chat.ID, msgID, localization.Get("notifStatus", sess.Language, status),
 			keyboards.SettingsNotifications(sess.Language, on))
 
+	case data == "settings_ai":
+		h.answerCb(cb.ID, "")
+		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
+			keyboards.SettingsAI(sess.Language, h.aiStateForChat(chat), h.cfg.AiName()))
+
+	case data == "ai_on":
+		h.answerCb(cb.ID, localization.Get("aiOn", sess.Language))
+		h.setAi(chat.ID, true)
+		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
+			keyboards.Settings(sess.Language, h.notifState(uid), true, h.cfg.AiName()))
+
+	case data == "ai_off":
+		h.answerCb(cb.ID, localization.Get("aiOff", sess.Language))
+		h.setAi(chat.ID, false)
+		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
+			keyboards.Settings(sess.Language, h.notifState(uid), false, h.cfg.AiName()))
+
 	case data == "notif_on":
 		h.answerCb(cb.ID, localization.Get("notifOnAlert", sess.Language))
 		h.setNotif(uid, true)
 		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
-			keyboards.Settings(sess.Language, true))
+			keyboards.Settings(sess.Language, true, h.aiStateForChat(chat), h.cfg.AiName()))
 
 	case data == "notif_off":
 		h.answerCb(cb.ID, localization.Get("notifOffAlert", sess.Language))
 		h.setNotif(uid, false)
 		h.editMsg(chat.ID, msgID, localization.Get("settings", sess.Language),
-			keyboards.Settings(sess.Language, false))
+			keyboards.Settings(sess.Language, false, h.aiStateForChat(chat), h.cfg.AiName()))
 
 	case data == "feedback":
 		h.answerCb(cb.ID, "")
@@ -699,44 +765,10 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		query, _ := sess.Data["imgur_search_query"].(string)
 		go h.fetchImgurSearch(chat.ID, query, countStr, sess.Language)
 
-	case strings.HasPrefix(data, "yt_fmt:"):
-		h.answerCb(cb.ID, localization.Get("ytDownloading", sess.Language))
-		format := strings.TrimPrefix(data, "yt_fmt:")
-		sess = h.store.GetOrCreate(uid)
-		ytURL, _ := sess.Data["yt_url"].(string)
-		h.store.SetState(uid, "idle")
-
-		go h.downloadAndSend(chat.ID, uid, ytURL, format, sess.Language)
-
-	case strings.HasPrefix(data, "tt_fmt:"):
-		h.answerCb(cb.ID, localization.Get("ttDownloading", sess.Language))
-		format := strings.TrimPrefix(data, "tt_fmt:")
-		sess = h.store.GetOrCreate(uid)
-		h.store.SetState(uid, "idle")
-
-		ttData, _ := sess.Data["tt_api_data"].(map[string]interface{})
-		go h.downloadTikTok(chat.ID, ttData, format, sess.Language)
-
-	case strings.HasPrefix(data, "fb_fmt:"):
-		h.answerCb(cb.ID, localization.Get("fbDownloading", sess.Language))
-		idxStr := strings.TrimPrefix(data, "fb_fmt:")
-		sess = h.store.GetOrCreate(uid)
-		h.store.SetState(uid, "idle")
-		go h.downloadFb(chat.ID, uid, idxStr, sess.Language)
-
-	case strings.HasPrefix(data, "sc_fmt:"):
-		h.answerCb(cb.ID, localization.Get("scDownloading", sess.Language))
-		idxStr := strings.TrimPrefix(data, "sc_fmt:")
-		sess = h.store.GetOrCreate(uid)
-		h.store.SetState(uid, "idle")
-		go h.downloadSnap(chat.ID, uid, idxStr, sess.Language)
-
-	case strings.HasPrefix(data, "tw_fmt:"):
-		h.answerCb(cb.ID, localization.Get("twDownloading", sess.Language))
-		idxStr := strings.TrimPrefix(data, "tw_fmt:")
-		sess = h.store.GetOrCreate(uid)
-		h.store.SetState(uid, "idle")
-		go h.downloadTwitter(chat.ID, uid, idxStr, sess.Language)
+	case dlIsPick(data):
+		d, sel := dlSplitPick(data)
+		h.answerCb(cb.ID, dlText(d, "Working", sess.Language))
+		h.handleDownloadPick(d, chat.ID, uid, sel, sess.Language)
 
 	case data == "confirm_yes":
 		h.answerCb(cb.ID, localization.Get("confirmedAlert", sess.Language))
@@ -753,7 +785,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		newLang := strings.TrimPrefix(data, "set_lang:")
 		h.store.SetLanguage(uid, newLang)
 		h.editMsg(chat.ID, msgID, localization.Get("languageChanged", newLang, localization.LanguageName(newLang)),
-			keyboards.Settings(newLang, h.notifState(uid)))
+			keyboards.Settings(newLang, h.notifState(uid), h.aiStateForChat(chat), h.cfg.AiName()))
 
 	case data == "back":
 		h.answerCb(cb.ID, "")
@@ -775,7 +807,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "dl_menu":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("downloadTitle", sess.Language), keyboards.DownloadMenu(sess.Language))
+		h.editMsg(chat.ID, msgID, localization.Get("downloadTitle", sess.Language), h.downloadMenu(sess.Language))
 
 	case data == "create_menu":
 		h.answerCb(cb.ID, "")
@@ -796,13 +828,16 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 	case strings.HasPrefix(data, "dl_"):
 		h.answerCb(cb.ID, "")
 		cmd := strings.TrimPrefix(data, "dl_")
+		d, ok := dlByID(cmd)
+		if !ok {
+			h.answerCb(cb.ID, localization.Get("error", sess.Language))
+			return
+		}
 		sess = h.store.GetOrCreate(uid)
 		sess.Data = make(map[string]interface{})
 		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "awaiting_"+cmd+"_url")
-		if key, ok := downloadPromptKey(cmd); ok {
-			h.editMsg(chat.ID, msgID, localization.Get(key, sess.Language), keyboards.Back(sess.Language))
-		}
+		h.store.SetState(uid, dlState(d.id))
+		h.editMsg(chat.ID, msgID, dlText(d, "Prompt", sess.Language), keyboards.Back(sess.Language))
 
 	case strings.HasPrefix(data, "tools_"):
 		h.answerCb(cb.ID, "")
@@ -1018,32 +1053,26 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 
 	case "awaiting_del":
 		h.store.SetState(uid, "idle")
-		n := 0
 		if update.Message.ReplyToMessage != nil {
+			n := 0
 			if h.deleteMsg(chat.ID, update.Message.ReplyToMessage.MessageID) {
 				n = 1
 			}
-		} else if num, err := strconv.Atoi(strings.TrimSpace(text)); err == nil {
-			if num > 100 {
-				num = 100
-			}
-			if num < 1 {
-				num = 1
-			}
-			ids := make([]int, 0, num)
-			for i := 0; i < 50; i++ {
-				ids = append(ids, update.Message.MessageID-i)
-			}
-			for i := 0; i < num; i++ {
-				ids = append(ids, update.Message.MessageID-i)
-			}
-			for _, id := range ids {
-				if h.deleteMsg(chat.ID, id) {
-					n++
-				}
-			}
+			h.sendMsg(chat.ID, localization.Get("delSuccess", lang, n), emptyKB)
+			return
 		}
-		h.sendMsg(chat.ID, localization.Get("delSuccess", lang, n), emptyKB)
+
+		num, err := strconv.Atoi(strings.TrimSpace(text))
+		if err != nil || num < 1 {
+			h.sendMsg(chat.ID, localization.Get("delPrompt", lang), emptyKB)
+			return
+		}
+		ids := recentIDs(update.Message.MessageID, num)
+		h.sendMsg(chat.ID, localization.Get("delWorking", lang, len(ids)), emptyKB)
+		go func() {
+			n := h.deleteMsgs(chat.ID, ids)
+			h.sendMsg(chat.ID, localization.Get("delSuccess", lang, n), emptyKB)
+		}()
 
 	case "awaiting_welcome_msg":
 		g := h.store.GetGroup(chat.ID)
@@ -1089,81 +1118,14 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		}
 		h.sendMsg(chat.ID, localization.Get("postSuccess", lang), emptyKB)
 
-	case "awaiting_yt_url":
-		if !isValidYouTubeURL(text) {
-			h.sendMsg(chat.ID, localization.Get("ytInvalid", lang), keyboards.Back(lang))
+		if d, ok := dlPendingState(sess.State); ok {
+			if !dlHostOK(d, text) {
+				h.sendMsg(chat.ID, dlText(d, "Invalid", lang), keyboards.Back(lang))
+				return
+			}
+			h.handleDownloadURL(d, chat.ID, uid, text, lang)
 			return
 		}
-		sess.Data["yt_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("ytFormat", lang), keyboards.YtFormatPicker(lang))
-
-	case "awaiting_ig_url":
-		if !isValidInstagramURL(text) {
-			h.sendMsg(chat.ID, localization.Get("igInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["ig_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("igDownloading", lang), keyboards.Back(lang))
-		go h.downloadInstagram(chat.ID, text, lang)
-
-	case "awaiting_tt_url":
-		if !isValidTikTokURL(text) {
-			h.sendMsg(chat.ID, localization.Get("ttInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["tt_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("ttDownloading", lang), keyboards.Back(lang))
-		go h.fetchTikTokInfo(chat.ID, uid, text, lang)
-
-	case "awaiting_fb_url":
-		if !isValidFacebookURL(text) {
-			h.sendMsg(chat.ID, localization.Get("fbInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["fb_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("fbDownloading", lang), keyboards.Back(lang))
-		go h.fetchFbInfo(chat.ID, uid, text, lang)
-
-	case "awaiting_pin_url":
-		if !isValidPinterestURL(text) {
-			h.sendMsg(chat.ID, localization.Get("pinInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["pin_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("pinDownloading", lang), keyboards.Back(lang))
-		go h.downloadPinterest(chat.ID, text, lang)
-
-	case "awaiting_sc_url":
-		if !isValidSnapchatURL(text) {
-			h.sendMsg(chat.ID, localization.Get("scInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["sc_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("scDownloading", lang), keyboards.Back(lang))
-		go h.fetchSnapInfo(chat.ID, uid, text, lang)
-
-	case "awaiting_tw_url":
-		if !isValidTwitterURL(text) {
-			h.sendMsg(chat.ID, localization.Get("twInvalid", lang), keyboards.Back(lang))
-			return
-		}
-		sess.Data["tw_url"] = text
-		h.store.SetSessionData(uid, sess.Data)
-		h.store.SetState(uid, "idle")
-		h.sendMsg(chat.ID, localization.Get("twDownloading", lang), keyboards.Back(lang))
-		go h.fetchTwitterInfo(chat.ID, uid, text, lang)
 
 	case "awaiting_bing_query":
 		if text == "" {
@@ -1365,54 +1327,30 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		}
 
 	default:
+		link := dlExtractURL(text)
 		if h.isChat(chat) && h.botIsAdmin(chat.ID) {
 			h.trackMessage(chat, user, text, lang)
 		}
 		if update.Message.ForwardFromChat != nil || update.Message.ForwardSenderName != "" {
 			h.sendMsg(chat.ID, localization.Get("forwardProcessing", lang), emptyKB)
 			go h.forwardMedia(chat.ID, uid, update.Message, lang)
-		} else if isValidTikTokURL(text) {
-			sess.Data["tt_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("ttDownloading", lang), keyboards.Back(lang))
-			go h.fetchTikTokInfo(chat.ID, uid, text, lang)
-		} else if isValidFacebookURL(text) {
-			sess.Data["fb_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("fbDownloading", lang), keyboards.Back(lang))
-			go h.fetchFbInfo(chat.ID, uid, text, lang)
-		} else if isValidPinterestURL(text) {
-			sess.Data["pin_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("pinDownloading", lang), keyboards.Back(lang))
-			go h.downloadPinterest(chat.ID, text, lang)
-		} else if isValidSnapchatURL(text) {
-			sess.Data["sc_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("scDownloading", lang), keyboards.Back(lang))
-			go h.fetchSnapInfo(chat.ID, uid, text, lang)
-		} else if isValidTwitterURL(text) {
-			sess.Data["tw_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("twDownloading", lang), keyboards.Back(lang))
-			go h.fetchTwitterInfo(chat.ID, uid, text, lang)
-		} else if strings.HasPrefix(text, "http://") || strings.HasPrefix(text, "https://") {
-			h.store.SetState(uid, "awaiting_reurl_url")
-			sess.Data["reurl_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("reurlSending", lang), keyboards.Back(lang))
-			go h.fetchReurl(chat.ID, text, lang)
-		} else if isValidYouTubeURL(text) {
-			sess.Data["yt_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("ytFormat", lang), keyboards.YtFormatPicker(lang))
-		} else if isValidInstagramURL(text) {
-			sess.Data["ig_url"] = text
-			h.store.SetSessionData(uid, sess.Data)
-			h.sendMsg(chat.ID, localization.Get("igDownloading", lang), keyboards.Back(lang))
-			go h.downloadInstagram(chat.ID, text, lang)
+		} else if link != "" && dlHasHost(link) {
+			hit := dlByHost(link)
+			switch {
+			case hit.offPath:
+				h.sendMsg(chat.ID, dlText(hit.d, "Unsupported", lang), keyboards.Back(lang))
+			case hit.ok:
+				h.handleDownloadURL(hit.d, chat.ID, uid, link, lang)
+			default:
+				h.store.SetState(uid, "awaiting_reurl_url")
+				sess.Data["reurl_url"] = link
+				h.store.SetSessionData(uid, sess.Data)
+				h.sendMsg(chat.ID, localization.Get("reurlSending", lang), keyboards.Back(lang))
+				go h.fetchReurl(chat.ID, link, lang)
+			}
 		} else {
-			h.sendMsg(chat.ID, localization.Get("unknownCommand", lang), keyboards.MainMenu(h.cfg, lang))
+			// Anything else is conversation for the AI agent.
+			h.maybeChatWithAI(chat, user, update.Message, text, lang)
 		}
 	}
 }
@@ -1442,14 +1380,31 @@ func (h *Handler) HandleInline(update tgbotapi.Update) {
 	}
 }
 
+// mediaKeys are the JSON fields known to hold a direct media URL. Checked
+// first so a wrapper object's own bookkeeping links don't win over the media.
+var mediaKeys = []string{"url", "download_url", "video_url", "media_url", "link", "file", "downloadLink", "downloadUrl"}
+
+// mediaItem is one downloadable file from an API response.
+type mediaItem struct {
+	url   string
+	title string
+	// group identifies the object this file was listed in, so a video can be
+	// told apart from the other posts in the same carousel.
+	group int
+}
+
+func isHTTPURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
 func extractURL(v interface{}) string {
 	switch val := v.(type) {
 	case string:
-		if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
+		if isHTTPURL(val) {
 			return val
 		}
 	case map[string]interface{}:
-		knownKeys := []string{"url", "download_url", "video_url", "media_url", "link", "file", "downloadLink", "downloadUrl"}
+		knownKeys := mediaKeys
 		for _, key := range knownKeys {
 			if u := extractURL(val[key]); u != "" {
 				return u
@@ -1479,8 +1434,153 @@ func extractURL(v interface{}) string {
 	return ""
 }
 
+// collectURLs walks an API response and returns every media URL it finds, in
+// document order and deduplicated. extractURL walks arrays backwards and keeps
+// only the last hit, which is why a multi-image Instagram post used to deliver
+// exactly one (the final) image.
+func collectURLs(v interface{}) []mediaItem {
+	var out []mediaItem
+	seen := make(map[string]bool)
+	group := 0
+	add := func(item mediaItem) {
+		if !isHTTPURL(item.url) || seen[item.url] {
+			return
+		}
+		seen[item.url] = true
+		out = append(out, item)
+	}
+	var walk func(v interface{}, title string)
+	walk = func(v interface{}, title string) {
+		switch val := v.(type) {
+		case string:
+			add(mediaItem{url: val, title: title, group: group})
+		case []interface{}:
+			for _, sub := range val {
+				walk(sub, title)
+			}
+		case map[string]interface{}:
+			// Each object gets its own group, and the counter never rewinds, so
+			// every element of a carousel is a separate group.
+			group++
+			// An object that carries its own URL: label it from its own fields.
+			local := itemTitle(val)
+			if local == "" {
+				local = title
+			}
+			// Nested containers first, so a wrapper's own url field can never
+			// shadow the media list hanging off the same object.
+			for _, key := range []string{"data", "items", "medias", "media", "results", "posts", "images", "videos"} {
+				if sub, ok := val[key]; ok {
+					walk(sub, local)
+				}
+			}
+			for _, key := range mediaKeys {
+				sub, ok := val[key]
+				if !ok {
+					continue
+				}
+				if s, ok := sub.(string); ok {
+					if isHTTPURL(s) {
+						add(mediaItem{url: s, title: local, group: group})
+					}
+					continue
+				}
+				walk(sub, local)
+			}
+			// Sorted so an entry holding both a video and an image always
+			// resolves in the same order; Go randomises map iteration.
+			rest := make([]string, 0, len(val))
+			for k := range val {
+				if !isMediaKey(k) {
+					rest = append(rest, k)
+				}
+			}
+			sort.Strings(rest)
+			for _, k := range rest {
+				sub := val[k]
+				if s, ok := sub.(string); ok {
+					if isHTTPURL(s) {
+						add(mediaItem{url: s, title: local, group: group})
+					}
+					continue
+				}
+				walk(sub, local)
+			}
+		}
+	}
+	walk(v, "")
+	return out
+}
+
+func isMediaKey(k string) bool {
+	for _, known := range mediaKeys {
+		if k == known {
+			return true
+		}
+	}
+	switch k {
+	case "data", "items", "medias", "results", "posts", "images", "videos", "media":
+		return true
+	}
+	return false
+}
+
+// itemTitle pulls the short label an API puts next to the URL ("Download
+// Video", "Download Image"), used to tell a video post from an image carousel.
+// Long values are ignored: some APIs put the post caption in `title`, and a
+// caption must not be mistaken for a media label.
+func itemTitle(m map[string]interface{}) string {
+	for _, key := range []string{"title", "name", "type", "media_type"} {
+		s, ok := m[key].(string)
+		if !ok || s == "" || len([]rune(s)) > mediaLabelMax {
+			continue
+		}
+		return s
+	}
+	return ""
+}
+
+// mediaLabelMax bounds a media label. Captions are far longer than any label an
+// API uses for a file.
+const mediaLabelMax = 40
+
+// isVideoItem reports whether an API entry is the video of a post rather than a
+// carousel image or a video thumbnail.
+func isVideoItem(it mediaItem) bool {
+	title := strings.ToLower(it.title)
+	// A thumbnail is never the video, whatever else the label says.
+	if strings.Contains(title, "thumbnail") || strings.Contains(title, "cover") ||
+		strings.Contains(title, "preview") {
+		return false
+	}
+	if strings.Contains(title, "video") || strings.Contains(title, "reel") {
+		return true
+	}
+	lower := strings.ToLower(it.url)
+	if i := strings.IndexAny(lower, "?#"); i >= 0 {
+		lower = lower[:i]
+	}
+	return strings.HasSuffix(lower, ".mp4") || strings.HasSuffix(lower, ".mov") ||
+		strings.HasSuffix(lower, ".webm") || strings.HasSuffix(lower, ".m4v")
+}
+
 func fetchMedia(apiURL string) ([]byte, string, error) {
-	resp, err := http.Get(apiURL)
+	body, ct, err := fetchMediaDepth(apiURL, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	return body, ct, nil
+}
+
+// fetchMediaDepth follows JSON wrappers that point at another media URL. The
+// depth guard stops a misbehaving endpoint that keeps pointing at itself from
+// growing the stack without bound.
+func fetchMediaDepth(apiURL string, depth int) ([]byte, string, error) {
+	if depth > 4 {
+		return nil, "", fmt.Errorf("too many media URL redirects")
+	}
+
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("request: %w", err)
 	}
@@ -1490,17 +1590,13 @@ func fetchMedia(apiURL string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	limitReader := io.LimitReader(resp.Body, maxDownloadSize+1)
-	body, err := io.ReadAll(limitReader)
+	body, err := readBody(resp, maxDownloadSize)
 	if err != nil {
 		return nil, "", fmt.Errorf("read: %w", err)
 	}
 
 	if len(body) == 0 {
 		return nil, "", fmt.Errorf("empty body")
-	}
-	if len(body) > maxDownloadSize {
-		return nil, "", fmt.Errorf("response too large (>100MB)")
 	}
 
 	ct := resp.Header.Get("Content-Type")
@@ -1510,7 +1606,7 @@ func fetchMedia(apiURL string) ([]byte, string, error) {
 		if err := json.Unmarshal(body, &result); err == nil {
 			if u := extractURL(result); u != "" {
 				log.Printf("Resolved media URL from JSON: %s", u)
-				return fetchMedia(u)
+				return fetchMediaDepth(u, depth+1)
 			}
 		}
 		preview := string(body)
@@ -1524,227 +1620,138 @@ func fetchMedia(apiURL string) ([]byte, string, error) {
 	return body, ct, nil
 }
 
-func isValidYouTubeURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
+// sendAlbum pushes images as one media group, falling back to individual sends
+// when Telegram rejects the group.
+func (h *Handler) sendAlbum(chatID int64, prefix string, album [][]byte, got int, caption, lang string) int {
+	if got == 1 {
+		h.sendPhotoBytes(chatID, prefix, album[0], caption, lang)
+		album[0] = nil
+		return 1
 	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "youtube.com") || strings.Contains(host, "youtu.be") || strings.Contains(host, "m.youtube.com")
+
+	media := make([]interface{}, 0, got)
+	stamp := time.Now().Format("150405")
+	for i := 0; i < got; i++ {
+		item := tgbotapi.InputMediaPhoto{
+			BaseInputMedia: tgbotapi.BaseInputMedia{
+				Type:  "photo",
+				Media: tgbotapi.FileBytes{Name: fmt.Sprintf("%s_%s_%d.jpg", prefix, stamp, i), Bytes: album[i]},
+			},
+		}
+		if i == 0 {
+			item.Caption = caption
+		}
+		media = append(media, item)
+	}
+
+	_, err := h.bot.SendMediaGroup(tgbotapi.MediaGroupConfig{ChatID: chatID, Media: media})
+	media = nil
+	if err == nil {
+		for i := range album {
+			album[i] = nil
+		}
+		return got
+	}
+	log.Printf("%s album rejected (%v), sending individually", prefix, err)
+
+	sent := 0
+	for i := 0; i < got; i++ {
+		if album[i] == nil {
+			continue
+		}
+		h.sendPhotoBytes(chatID, prefix, album[i], "", lang)
+		album[i] = nil
+		sent++
+		time.Sleep(igAlbumPause)
+	}
+	return sent
 }
 
-func (h *Handler) downloadAndSend(chatID int64, uid int64, videoURL, format, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/loaderto/download?apiKey=%s&format=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(format), url.QueryEscape(videoURL))
-
-	log.Printf("YT download: format=%s url=%s", format, videoURL)
-
-	body, _, err := fetchMedia(apiURL)
-	if err != nil {
-		log.Printf("YT download failed: %v", err)
-		h.sendMsg(chatID, localization.Get("ytError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("ytUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if format == "mp3" {
-		ext = ".mp3"
-	}
-
-	fileName := fmt.Sprintf("youtube_%s_%s%s", format, time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: body}
-
-	if format == "mp3" {
-		audio := tgbotapi.NewAudio(chatID, fileBytes)
-		if _, err := h.bot.Send(audio); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("ytError", lang), keyboards.Back(lang))
-				body = nil
-				return
-			}
-		}
-	} else {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("ytError", lang), keyboards.Back(lang))
-				body = nil
-				return
-			}
+func (h *Handler) sendPhotoBytes(chatID int64, prefix string, body []byte, caption, lang string) {
+	name := fmt.Sprintf("%s_%s.jpg", prefix, time.Now().Format("150405"))
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{Name: name, Bytes: body})
+	photo.Caption = caption
+	if _, err := h.bot.Send(photo); err != nil {
+		if _, err := h.bot.Send(tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: body})); err != nil {
+			log.Printf("IG photo send error: %v", err)
 		}
 	}
-
-	body = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("ytSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
 
-func isValidInstagramURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
+// mediaExt picks a file extension for a downloaded body. The Content-Type wins
+// when it is meaningful, then a downloader's declared type, then the URL's own
+// extension: a GitHub zipball arrives as application/octet-stream from a URL with
+// no extension, and must not be named .jpg. When nothing says anything, no
+// extension is invented.
+func mediaExt(ct, rawURL, declared string) string {
+	lower := strings.ToLower(ct)
+	switch {
+	case strings.Contains(lower, "png"):
+		return ".png"
+	case strings.Contains(lower, "gif"):
+		return ".gif"
+	case strings.Contains(lower, "webp"):
+		return ".webp"
+	case strings.Contains(lower, "jpeg"), strings.Contains(lower, "jpg"):
+		return ".jpg"
+	case strings.Contains(lower, "audio"), strings.Contains(lower, "mpeg"):
+		return ".mp3"
+	case strings.Contains(lower, "video"), strings.Contains(lower, "mp4"):
+		return ".mp4"
+	case strings.Contains(lower, "zip"), strings.Contains(lower, "compressed"):
+		return ".zip"
+	case strings.Contains(lower, "pdf"):
+		return ".pdf"
 	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "instagram.com") || strings.Contains(host, "instagr.am")
+	if declared != "" {
+		return declared
+	}
+	return urlExt(rawURL)
 }
 
-func isValidTikTokURL(raw string) bool {
-	u, err := url.Parse(raw)
+// urlExt reads a sane extension off a URL path.
+func urlExt(rawURL string) string {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return false
+		return ""
 	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "tiktok.com")
-}
-
-func isValidFacebookURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
+	ext := strings.ToLower(path.Ext(u.Path))
+	if len(ext) < 2 || len(ext) > 6 {
+		return ""
 	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "facebook.com") || strings.Contains(host, "fb.watch") || strings.Contains(host, "fb.com")
-}
-
-func isValidPinterestURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "pinterest.com") || strings.Contains(host, "pin.it")
-}
-
-func isValidSnapchatURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "snapchat.com") || strings.Contains(host, "t.snapchat.com")
-}
-
-func isValidTwitterURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Host)
-	return strings.Contains(host, "twitter.com") || strings.Contains(host, "x.com") || strings.Contains(host, "t.co")
-}
-
-func (h *Handler) downloadInstagram(chatID int64, mediaURL, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/instagram/download?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
-
-	log.Printf("IG download: %s", mediaURL)
-
-	body, ct, err := fetchMedia(apiURL)
-	if err != nil {
-		log.Printf("IG download failed: %v", err)
-		h.sendMsg(chatID, localization.Get("igError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("igUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if strings.Contains(ct, "image") {
-		ext = ".jpg"
-	}
-
-	fileName := fmt.Sprintf("instagram_%s%s", time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: body}
-
-	if strings.Contains(ct, "video") {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("igError", lang), keyboards.Back(lang))
-				body = nil
-				return
-			}
-		}
-	} else if strings.Contains(ct, "image") {
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("igError", lang), keyboards.Back(lang))
-				body = nil
-				return
-			}
-		}
-	} else {
-		doc := tgbotapi.NewDocument(chatID, fileBytes)
-		if _, err := h.bot.Send(doc); err != nil {
-			h.sendMsg(chatID, localization.Get("igError", lang), keyboards.Back(lang))
-			body = nil
-			return
+	for _, c := range ext[1:] {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		default:
+			return ""
 		}
 	}
-
-	body = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("igSuccess", lang), keyboards.MainMenu(h.cfg, lang))
+	return ext
 }
 
-func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string) {
-	defer h.recoverPanic()
+// tiktokInfo fetches TikTok metadata, stores the raw payload for the format
+// pick and returns the info text to show. Presentation is left to the caller so
+// the registry can render it with the site's own labels.
+func (h *Handler) tiktokInfo(uid int64, videoURL string) (string, bool) {
 	apiURL := fmt.Sprintf("%s/tiktok/download?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
 
 	log.Printf("TT info: %s", videoURL)
 
-	resp, err := http.Get(apiURL)
+	v, err := h.apiJSON(apiURL)
 	if err != nil {
 		log.Printf("TT API error: %v", err)
-		h.sendMsg(chatID, localization.Get("ttError", lang), keyboards.Back(lang))
-		return
+		return "", false
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("TT read error: %v", err)
-		h.sendMsg(chatID, localization.Get("ttError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("TT JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("ttError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
+	result, _ := v.(map[string]interface{})
+	if ok, _ := result["success"].(bool); ok == false {
 		log.Printf("TT API returned success=false")
-		h.sendMsg(chatID, localization.Get("ttError", lang), keyboards.Back(lang))
-		return
+		return "", false
 	}
-
 	data, _ := result["data"].(map[string]interface{})
 	if data == nil {
 		log.Printf("TT API returned no data")
-		h.sendMsg(chatID, localization.Get("ttError", lang), keyboards.Back(lang))
-		return
+		return "", false
 	}
 
 	title, _ := data["title"].(string)
@@ -1770,7 +1777,7 @@ func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string
 	if authorData != nil {
 		nickname, _ := authorData["nickname"].(string)
 		fullname, _ := authorData["fullname"].(string)
-		if nickname != "" && nickname != fullname {
+		if authorData != nil && nickname != "" && nickname != fullname {
 			author = fmt.Sprintf("%s (%s)", nickname, fullname)
 		} else if fullname != "" {
 			author = fullname
@@ -1786,7 +1793,7 @@ func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string
 		}
 	}
 
-	msg := fmt.Sprintf("📱 *TikTok Video*\n\n")
+	msg := "📱 *TikTok Video*\n\n"
 	if title != "" {
 		msg += fmt.Sprintf("*Title:* %s\n", title)
 	}
@@ -1818,13 +1825,12 @@ func (h *Handler) fetchTikTokInfo(chatID int64, uid int64, videoURL, lang string
 	if downloads != "" {
 		msg += fmt.Sprintf("\n📥 %s Downloads", downloads)
 	}
-	msg += "\n\n*Choose format:*"
 
 	sess := h.store.GetOrCreate(uid)
 	sess.Data["tt_api_data"] = data
 	h.store.SetSessionData(uid, sess.Data)
 
-	h.sendMsg(chatID, msg, keyboards.TtFormatPicker(lang))
+	return msg + "\n\n*Choose format:*", true
 }
 
 func toFloat64(v interface{}) (float64, bool) {
@@ -1844,7 +1850,7 @@ func toFloat64(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-func (h *Handler) downloadTikTok(chatID int64, data map[string]interface{}, format, lang string) {
+func (h *Handler) downloadTikTok(chatID, uid int64, data map[string]interface{}, format, lang string) {
 	defer h.recoverPanic()
 	h.acquireDL()
 	defer h.releaseDL()
@@ -1939,415 +1945,8 @@ func (h *Handler) downloadTikTok(chatID int64, data map[string]interface{}, form
 	}
 
 	body = nil
-	runtime.GC()
+	h.store.ClearSessionData(uid)
 	h.sendMsg(chatID, localization.Get("ttSuccess", lang), keyboards.MainMenu(h.cfg, lang))
-}
-
-func (h *Handler) fetchFbInfo(chatID int64, uid int64, videoURL, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/fbdown/download?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(videoURL))
-
-	log.Printf("FB info: %s", videoURL)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		log.Printf("FB API error: %v", err)
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("FB read error: %v", err)
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("FB JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("FB API returned success=false")
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("FB API returned no data")
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	title, _ := data["title"].(string)
-	duration, _ := data["duration"].(string)
-	quality, _ := data["quality"].(string)
-
-	qualities, _ := data["allQualities"].([]interface{})
-
-	msg := fmt.Sprintf("📘 *Facebook Video*\n\n")
-	if title != "" {
-		msg += fmt.Sprintf("*Title:* %s\n", title)
-	}
-	if duration != "" {
-		msg += fmt.Sprintf("*Duration:* %s\n", duration)
-	}
-	if quality != "" {
-		msg += fmt.Sprintf("*Quality:* %s\n", quality)
-	}
-	msg += "\n*Choose quality:*"
-
-	sess := h.store.GetOrCreate(uid)
-	sess.Data["fb_qualities"] = qualities
-	if len(qualities) == 0 {
-		sess.Data["fb_direct_url"], _ = data["download"].(string)
-	}
-	h.store.SetSessionData(uid, sess.Data)
-
-	if len(qualities) > 0 {
-		h.sendMsg(chatID, msg, keyboards.FbQualityPicker(qualities, lang))
-	} else if directURL, ok := data["download"].(string); ok && directURL != "" {
-		log.Printf("FB no quality list, using direct URL: %s", directURL)
-		go h.downloadFb(chatID, uid, "-1", lang)
-	} else {
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-	}
-}
-
-func (h *Handler) downloadFb(chatID int64, uid int64, idxStr, lang string) {
-	h.acquireDL()
-	defer h.releaseDL()
-
-	sess := h.store.GetOrCreate(uid)
-
-	var mediaURL string
-	qualities, _ := sess.Data["fb_qualities"].([]interface{})
-
-	if idxStr == "-1" {
-		mediaURL, _ = sess.Data["fb_direct_url"].(string)
-	} else {
-		idx := 0
-		fmt.Sscanf(idxStr, "%d", &idx)
-		if idx >= 0 && idx < len(qualities) {
-			if item, ok := qualities[idx].(map[string]interface{}); ok {
-				mediaURL, _ = item["url"].(string)
-			}
-		}
-	}
-
-	if mediaURL == "" {
-		log.Printf("FB no URL found for idx=%s", idxStr)
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	log.Printf("FB download: idx=%s url=%s", idxStr, mediaURL)
-
-	body, ct, err := fetchMedia(mediaURL)
-	if err != nil {
-		log.Printf("FB download failed: %v", err)
-		h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("fbUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if strings.Contains(ct, "image") {
-		ext = ".jpg"
-	}
-
-	fileName := fmt.Sprintf("facebook_%s%s", time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: body}
-
-	if strings.Contains(ct, "video") {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-				body = nil
-				return
-			}
-		}
-	} else {
-		doc := tgbotapi.NewDocument(chatID, fileBytes)
-		if _, err := h.bot.Send(doc); err != nil {
-			h.sendMsg(chatID, localization.Get("fbError", lang), keyboards.Back(lang))
-			body = nil
-			return
-		}
-	}
-
-	body = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("fbSuccess", lang), keyboards.MainMenu(h.cfg, lang))
-}
-
-func (h *Handler) downloadPinterest(chatID int64, mediaURL, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/download/pinterest?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
-
-	log.Printf("Pinterest download: %s", mediaURL)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		log.Printf("Pinterest API error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Pinterest read error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Pinterest JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Pinterest API returned success=false")
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Pinterest API returned no data")
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	downloadURL, _ := data["download_url"].(string)
-	if downloadURL == "" {
-		log.Printf("Pinterest no download_url in response")
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	log.Printf("Pinterest resolved URL: %s", downloadURL)
-
-	dlBody, ct, err := fetchMedia(downloadURL)
-	if err != nil {
-		log.Printf("Pinterest download failed: %v", err)
-		h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("pinUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if strings.Contains(ct, "image") {
-		ext = ".jpg"
-	}
-
-	fileName := fmt.Sprintf("pinterest_%s%s", time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: dlBody}
-
-	if strings.Contains(ct, "video") {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else if strings.Contains(ct, "image") {
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else {
-		doc := tgbotapi.NewDocument(chatID, fileBytes)
-		if _, err := h.bot.Send(doc); err != nil {
-			h.sendMsg(chatID, localization.Get("pinError", lang), keyboards.Back(lang))
-			dlBody = nil
-			return
-		}
-	}
-
-	dlBody = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("pinSuccess", lang), keyboards.MainMenu(h.cfg, lang))
-}
-
-func (h *Handler) fetchSnapInfo(chatID int64, uid int64, mediaURL, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/download/snapchat?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(mediaURL))
-
-	log.Printf("Snapchat info: %s", mediaURL)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		log.Printf("Snapchat API error: %v", err)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Snapchat read error: %v", err)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Snapchat JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Snapchat API returned success=false")
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Snapchat API returned no data")
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	snaps, _ := data["result"].([]interface{})
-	if len(snaps) == 0 {
-		log.Printf("Snapchat API returned empty result array")
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	sess := h.store.GetOrCreate(uid)
-	sess.Data["sc_snaps"] = snaps
-	h.store.SetSessionData(uid, sess.Data)
-
-	if len(snaps) == 1 {
-		h.sendMsg(chatID, localization.Get("scDownloading", lang), keyboards.Back(lang))
-		go h.downloadSnap(chatID, uid, "0", lang)
-	} else {
-		h.sendMsg(chatID, localization.Get("scFormat", lang), keyboards.SnapPicker(len(snaps), lang))
-	}
-}
-
-func (h *Handler) downloadSnap(chatID int64, uid int64, idxStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	sess := h.store.GetOrCreate(uid)
-	snaps, _ := sess.Data["sc_snaps"].([]interface{})
-
-	idx := 0
-	fmt.Sscanf(idxStr, "%d", &idx)
-	if idx < 0 || idx >= len(snaps) {
-		log.Printf("Snapchat invalid index %d (len=%d)", idx, len(snaps))
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	item, ok := snaps[idx].(map[string]interface{})
-	if !ok {
-		log.Printf("Snapchat invalid item at index %d", idx)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	mediaURL, _ := item["video"].(string)
-	if mediaURL == "" {
-		mediaURL, _ = item["image"].(string)
-	}
-	if mediaURL == "" {
-		log.Printf("Snapchat no video or image URL at index %d", idx)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	log.Printf("Snapchat download idx=%d url=%s", idx, mediaURL)
-
-	h.sendMsg(chatID, localization.Get("scDownloading", lang), keyboards.Back(lang))
-
-	dlBody, ct, err := fetchMedia(mediaURL)
-	if err != nil {
-		log.Printf("Snapchat download failed: %v", err)
-		h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("scUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if strings.Contains(ct, "image") {
-		ext = ".jpg"
-	}
-
-	fileName := fmt.Sprintf("snapchat_%s%s", time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: dlBody}
-
-	if strings.Contains(ct, "video") {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else if strings.Contains(ct, "image") {
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else {
-		doc := tgbotapi.NewDocument(chatID, fileBytes)
-		if _, err := h.bot.Send(doc); err != nil {
-			h.sendMsg(chatID, localization.Get("scError", lang), keyboards.Back(lang))
-			dlBody = nil
-			return
-		}
-	}
-
-	dlBody = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("scSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
 
 func truncate(s string, max int) string {
@@ -2431,169 +2030,6 @@ func buildTwitterCaption(data map[string]interface{}) string {
 	return caption
 }
 
-func (h *Handler) fetchTwitterInfo(chatID int64, uid int64, tweetURL, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/twitter/download?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(tweetURL))
-
-	log.Printf("Twitter info: %s", tweetURL)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		log.Printf("Twitter API error: %v", err)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Twitter read error: %v", err)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Twitter JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Twitter API returned success=false")
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Twitter API returned no data")
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	media, _ := data["media"].([]interface{})
-	if len(media) == 0 {
-		log.Printf("Twitter API returned no media")
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	caption := buildTwitterCaption(data)
-
-	sess := h.store.GetOrCreate(uid)
-	sess.Data["tw_media"] = media
-	sess.Data["tw_caption"] = caption
-	h.store.SetSessionData(uid, sess.Data)
-
-	if len(media) == 1 {
-		h.sendMsg(chatID, localization.Get("twDownloading", lang), keyboards.Back(lang))
-		go h.downloadTwitter(chatID, uid, "0", lang)
-	} else {
-		h.sendMsg(chatID, caption, keyboards.MediaPicker(len(media), "Media", "tw", lang))
-	}
-}
-
-func (h *Handler) downloadTwitter(chatID int64, uid int64, idxStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	sess := h.store.GetOrCreate(uid)
-	media, _ := sess.Data["tw_media"].([]interface{})
-	caption, _ := sess.Data["tw_caption"].(string)
-
-	idx := 0
-	fmt.Sscanf(idxStr, "%d", &idx)
-	if idx < 0 || idx >= len(media) {
-		log.Printf("Twitter invalid index %d (len=%d)", idx, len(media))
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	item, ok := media[idx].(map[string]interface{})
-	if !ok {
-		log.Printf("Twitter invalid item at index %d", idx)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	mediaURL, _ := item["url"].(string)
-	mediaType, _ := item["type"].(string)
-	if mediaURL == "" {
-		log.Printf("Twitter no URL at index %d", idx)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	log.Printf("Twitter download idx=%d type=%s url=%s", idx, mediaType, mediaURL)
-
-	h.sendMsg(chatID, localization.Get("twDownloading", lang), keyboards.Back(lang))
-
-	dlBody, ct, err := fetchMedia(mediaURL)
-	if err != nil {
-		log.Printf("Twitter fetch failed: %v", err)
-		h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("twUploading", lang), keyboards.Back(lang))
-
-	ext := ".mp4"
-	if mediaType == "photo" || strings.Contains(ct, "image") {
-		ext = ".jpg"
-	}
-
-	fileName := fmt.Sprintf("twitter_%s%s", time.Now().Format("150405"), ext)
-	fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: dlBody}
-
-	if mediaType == "video" || strings.Contains(ct, "video") {
-		video := tgbotapi.NewVideo(chatID, fileBytes)
-		video.Caption = caption
-		video.ParseMode = "Markdown"
-		video.SupportsStreaming = true
-		if _, err := h.bot.Send(video); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			doc.Caption = caption
-			doc.ParseMode = "Markdown"
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else if mediaType == "photo" || strings.Contains(ct, "image") {
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		photo.Caption = caption
-		photo.ParseMode = "Markdown"
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			doc.Caption = caption
-			doc.ParseMode = "Markdown"
-			if _, err := h.bot.Send(doc); err != nil {
-				h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-				dlBody = nil
-				return
-			}
-		}
-	} else {
-		doc := tgbotapi.NewDocument(chatID, fileBytes)
-		doc.Caption = caption
-		doc.ParseMode = "Markdown"
-		if _, err := h.bot.Send(doc); err != nil {
-			h.sendMsg(chatID, localization.Get("twError", lang), keyboards.Back(lang))
-			dlBody = nil
-			return
-		}
-	}
-
-	dlBody = nil
-	runtime.GC()
-	h.sendMsg(chatID, localization.Get("twSuccess", lang), keyboards.MainMenu(h.cfg, lang))
-}
-
 func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
 	defer h.recoverPanic()
 	apiURL := fmt.Sprintf("%s/bing/search?apiKey=%s&query=%s",
@@ -2601,7 +2037,7 @@ func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
 
 	log.Printf("Bing search: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Bing search API error: %v", err)
 		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
@@ -2609,7 +2045,7 @@ func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Bing search read error: %v", err)
 		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
@@ -2694,7 +2130,7 @@ func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
 
 	log.Printf("Bing images: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Bing images API error: %v", err)
 		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
@@ -2702,7 +2138,7 @@ func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Bing images read error: %v", err)
 		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
@@ -2794,8 +2230,6 @@ func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
 		sent++
 	}
 
-	runtime.GC()
-
 	if sent == 0 {
 		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
 	} else {
@@ -2813,7 +2247,7 @@ func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
 
 	log.Printf("Pinterest search: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Pinterest search API error: %v", err)
 		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
@@ -2821,7 +2255,7 @@ func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Pinterest search read error: %v", err)
 		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
@@ -2906,8 +2340,6 @@ func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
 		sent++
 	}
 
-	runtime.GC()
-
 	if sent == 0 {
 		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
 	} else {
@@ -2925,7 +2357,7 @@ func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string)
 
 	log.Printf("Sticker search: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Sticker search API error: %v", err)
 		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
@@ -2933,7 +2365,7 @@ func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Sticker search read error: %v", err)
 		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
@@ -3044,8 +2476,6 @@ func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string)
 		sent++
 	}
 
-	runtime.GC()
-
 	if sent == 0 {
 		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
 	} else {
@@ -3086,7 +2516,7 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 
 	log.Printf("Imgur search: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Imgur search API error: %v", err)
 		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
@@ -3094,7 +2524,7 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Imgur search read error: %v", err)
 		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
@@ -3197,8 +2627,6 @@ func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
 		sent++
 	}
 
-	runtime.GC()
-
 	if sent == 0 {
 		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
 	} else {
@@ -3213,7 +2641,7 @@ func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
 
 	log.Printf("YouTube search: %s", query)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("YouTube search API error: %v", err)
 		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
@@ -3221,7 +2649,7 @@ func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("YouTube search read error: %v", err)
 		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
@@ -3360,7 +2788,7 @@ func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) 
 
 	log.Printf("TextPro: effect=%s text1=%s text2=%s", effect, text1, text2)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("TextPro API error: %v", err)
 		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
@@ -3368,7 +2796,7 @@ func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) 
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("TextPro read error: %v", err)
 		h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
@@ -3436,13 +2864,11 @@ func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) 
 			log.Printf("TextPro send error: %v", err)
 			h.sendMsg(chatID, localization.Get("textProError", lang), keyboards.Back(lang))
 			imgBody = nil
-			runtime.GC()
 			return
 		}
 	}
 
 	imgBody = nil
-	runtime.GC()
 	h.sendMsg(chatID, localization.Get("textProSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
 
@@ -3462,7 +2888,7 @@ func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string)
 
 	log.Printf("Photooxy: effect=%s text1=%s text2=%s", effect, text1, text2)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Photooxy API error: %v", err)
 		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
@@ -3470,7 +2896,7 @@ func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Photooxy read error: %v", err)
 		h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
@@ -3531,13 +2957,11 @@ func (h *Handler) fetchPhotooxy(chatID int64, effect, text1, text2, lang string)
 			log.Printf("Photooxy send error: %v", err)
 			h.sendMsg(chatID, localization.Get("photooxyError", lang), keyboards.Back(lang))
 			imgBody = nil
-			runtime.GC()
 			return
 		}
 	}
 
 	imgBody = nil
-	runtime.GC()
 	h.sendMsg(chatID, localization.Get("photooxySuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
 
@@ -3557,7 +2981,7 @@ func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
 
 	log.Printf("Ephoto: effect=%s text1=%s text2=%s", effect, text1, text2)
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Ephoto API error: %v", err)
 		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
@@ -3565,7 +2989,7 @@ func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Ephoto read error: %v", err)
 		h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
@@ -3626,13 +3050,11 @@ func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
 			log.Printf("Ephoto send error: %v", err)
 			h.sendMsg(chatID, localization.Get("ephotoError", lang), keyboards.Back(lang))
 			imgBody = nil
-			runtime.GC()
 			return
 		}
 	}
 
 	imgBody = nil
-	runtime.GC()
 	h.sendMsg(chatID, localization.Get("ephotoSuccess", lang), keyboards.MainMenu(h.cfg, lang))
 }
 
@@ -3641,7 +3063,7 @@ func (h *Handler) fetchReurl(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/reurl?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Reurl API error: %v", err)
 		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
@@ -3649,7 +3071,7 @@ func (h *Handler) fetchReurl(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Reurl read error: %v", err)
 		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
@@ -3699,7 +3121,7 @@ func (h *Handler) fetchTinycc(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/tinycc?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Tinycc API error: %v", err)
 		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
@@ -3707,7 +3129,7 @@ func (h *Handler) fetchTinycc(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Tinycc read error: %v", err)
 		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
@@ -3750,7 +3172,7 @@ func (h *Handler) fetchItsssl(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/itsssl?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Itsssl API error: %v", err)
 		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
@@ -3758,7 +3180,7 @@ func (h *Handler) fetchItsssl(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Itsssl read error: %v", err)
 		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
@@ -3801,7 +3223,7 @@ func (h *Handler) fetchCuqin(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/cuqin?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Cuqin API error: %v", err)
 		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
@@ -3809,7 +3231,7 @@ func (h *Handler) fetchCuqin(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Cuqin read error: %v", err)
 		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
@@ -3852,7 +3274,7 @@ func (h *Handler) fetchVurl(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/vurl?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Vurl API error: %v", err)
 		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
@@ -3860,7 +3282,7 @@ func (h *Handler) fetchVurl(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Vurl read error: %v", err)
 		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
@@ -3903,7 +3325,7 @@ func (h *Handler) fetchTiny(chatID int64, longURL, lang string) {
 	apiURL := fmt.Sprintf("%s/shortener/tiny?apiKey=%s&url=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Tiny API error: %v", err)
 		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
@@ -3911,7 +3333,7 @@ func (h *Handler) fetchTiny(chatID int64, longURL, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Tiny read error: %v", err)
 		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
@@ -3954,7 +3376,7 @@ func (h *Handler) fetchGoogleNews(chatID int64, query, lang string) {
 	apiURL := fmt.Sprintf("%s/news/google?apiKey=%s&query=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -3962,7 +3384,7 @@ func (h *Handler) fetchGoogleNews(chatID int64, query, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4023,7 +3445,7 @@ func (h *Handler) fetchBbcNews(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/news/bbc?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("BBC News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4031,7 +3453,7 @@ func (h *Handler) fetchBbcNews(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("BBC News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4097,7 +3519,7 @@ func (h *Handler) fetchCnnNews(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/news/cnn?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("CNN News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4105,7 +3527,7 @@ func (h *Handler) fetchCnnNews(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("CNN News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4171,7 +3593,7 @@ func (h *Handler) fetchAljazeeraNews(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/news/aljazeera?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Al Jazeera News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4179,7 +3601,7 @@ func (h *Handler) fetchAljazeeraNews(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Al Jazeera News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4238,7 +3660,7 @@ func (h *Handler) fetchCgtnNews(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/news/cgtnWorld?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("CGTN News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4246,7 +3668,7 @@ func (h *Handler) fetchCgtnNews(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("CGTN News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4305,7 +3727,7 @@ func (h *Handler) fetchTrtNews(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/news/trtWorld?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("TRT News API error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4313,7 +3735,7 @@ func (h *Handler) fetchTrtNews(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("TRT News read error: %v", err)
 		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
@@ -4372,7 +3794,7 @@ func (h *Handler) fetchCricket(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/sports/cricket?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Cricket API error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4380,7 +3802,7 @@ func (h *Handler) fetchCricket(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Cricket read error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4439,7 +3861,7 @@ func (h *Handler) fetchNfl(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/sports/nfl?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("NFL API error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4447,7 +3869,7 @@ func (h *Handler) fetchNfl(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("NFL read error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4518,7 +3940,7 @@ func (h *Handler) fetchNba(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/sports/nba?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("NBA API error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4526,7 +3948,7 @@ func (h *Handler) fetchNba(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("NBA read error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4595,7 +4017,7 @@ func (h *Handler) fetchCricbuzz(chatID int64, lang string) {
 	apiURL := fmt.Sprintf("%s/sports/cricbuzz?apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
 
-	resp, err := http.Get(apiURL)
+	resp, err := mediaClient.Get(apiURL)
 	if err != nil {
 		log.Printf("Cricbuzz API error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4603,7 +4025,7 @@ func (h *Handler) fetchCricbuzz(chatID int64, lang string) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBody(resp, maxAPISize)
 	if err != nil {
 		log.Printf("Cricbuzz read error: %v", err)
 		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
@@ -4723,13 +4145,13 @@ func (h *Handler) fetchImageEffect(chatID int64, effect string, file tgbotapi.Fi
 		h.cfg.EffectiveApiBaseURL(), effect, h.cfg.EffectiveApiKey())
 
 	fileURL := file.Link(h.bot.Token)
-	resp, err := http.Get(fileURL)
+	resp, err := mediaClient.Get(fileURL)
 	if err != nil {
 		log.Printf("ImageEffect download error: %v", err)
 		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
 		return
 	}
-	imgBytes, err := io.ReadAll(resp.Body)
+	imgBytes, err := readBody(resp, maxDownloadSize)
 	resp.Body.Close()
 	if err != nil {
 		log.Printf("ImageEffect read error: %v", err)
@@ -4757,8 +4179,7 @@ func (h *Handler) fetchImageEffect(chatID int64, effect string, file tgbotapi.Fi
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
-	client := &http.Client{}
-	resp2, err := client.Do(req)
+	resp2, err := mediaClient.Do(req)
 	if err != nil {
 		log.Printf("ImageEffect API error: %v", err)
 		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
@@ -4766,7 +4187,7 @@ func (h *Handler) fetchImageEffect(chatID int64, effect string, file tgbotapi.Fi
 	}
 	defer resp2.Body.Close()
 
-	body, err := io.ReadAll(resp2.Body)
+	body, err := readBody(resp2, maxDownloadSize)
 	if err != nil {
 		log.Printf("ImageEffect read error: %v", err)
 		h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
@@ -4795,13 +4216,11 @@ func (h *Handler) fetchImageEffect(chatID int64, effect string, file tgbotapi.Fi
 				log.Printf("ImageEffect send error: %v", err)
 				h.sendMsg(chatID, localization.Get(errKey, lang), keyboards.Back(lang))
 				body = nil
-				runtime.GC()
 				return
 			}
 		}
 
 		body = nil
-		runtime.GC()
 		h.sendMsg(chatID, localization.Get(okKey, lang), keyboards.MainMenu(h.cfg, lang))
 		return
 	}

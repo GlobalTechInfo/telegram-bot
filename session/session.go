@@ -2,8 +2,11 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -64,10 +67,91 @@ type Store struct {
 	db *bbolt.DB
 }
 
-func NewStore(dbPath string) *Store {
-	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+// resolveDBPath makes sure the directory holding the database exists. bbolt
+// creates the file but never the directories above it, so a configured path like
+// /bot/data/bot.db fails on any host that has not had that directory before.
+//
+// If the configured directory cannot be used the database falls back to the first
+// candidate that is genuinely writable, chosen by writing a probe file rather than
+// by guessing from the error: a Docker path like /bot/data does not exist outside
+// Docker, and /bot cannot be created without root. Falling back rather than
+// crashing keeps the bot running, with a loud warning because the data then lives
+// on whatever filesystem the host gives us.
+func resolveDBPath(dbPath string) string {
+	dir := filepath.Dir(dbPath)
+
+	// A bare or "./" prefixed name already points at the working directory, so
+	// there is nothing to create and the path is returned untouched.
+	if dir == "" || dir == "." {
+		if writableDir(".") {
+			return dbPath
+		}
+		log.Printf("⚠️ Working directory is not writable")
+	} else if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("⚠️ Cannot create database directory %s: %v", dir, err)
+	} else if !writableDir(dir) {
+		log.Printf("⚠️ Database directory %s is not writable", dir)
+	} else {
+		log.Printf("🗄️ Database directory ready: %s", dir)
+		return dbPath
+	}
+
+	// The working directory comes first because that is where the file already
+	// lives on most hosts, so the fallback keeps the existing sessions instead of
+	// silently starting over somewhere else.
+	name := filepath.Base(dbPath)
+	for _, cand := range []string{".", "./data", os.TempDir()} {
+		if !writableDir(cand) {
+			continue
+		}
+		fallback := filepath.Join(cand, name)
+		log.Printf("⚠️ Using %s instead — sessions will not persist if this directory is cleared", fallback)
+		return fallback
+	}
+
+	log.Fatalf("❌ No writable directory for the database (tried %s, ., ./data, %s)", dir, os.TempDir())
+	return dbPath
+}
+
+// writableDir proves a directory accepts new files. The permission bits are not
+// enough to trust: a read-only mount or a full disk reports no error on MkdirAll
+// and then fails on the open that matters.
+func writableDir(dir string) bool {
+	f, err := os.CreateTemp(dir, ".probe-*")
 	if err != nil {
-		log.Fatalf("❌ Failed to open database %s: %v", dbPath, err)
+		return false
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return true
+}
+
+func NewStore(dbPath string) *Store {
+	dbPath = resolveDBPath(dbPath)
+
+	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
+		Timeout: 2 * time.Second,
+		// This DB is small and rewritten constantly; the map freelist keeps
+		// lookups cheap and NoFreelistSync skips a freelist write per commit.
+		FreelistType:    bbolt.FreelistMapType,
+		NoFreelistSync:  true,
+		InitialMmapSize: 32 << 20,
+		NoSync:          false,
+	})
+	if err != nil {
+		// A lock timeout is not a permissions problem, and saying so sent people
+		// off to chmod a directory that was fine while a second copy of the bot
+		// held the file.
+		if errors.Is(err, bbolt.ErrTimeout) {
+			// Deliberately no advice to delete the file: it holds every session,
+			// and a stale lock is cleared by stopping the process holding it, not
+			// by removing the data.
+			log.Fatalf("❌ Database %s is locked by another running instance. "+
+				"Stop that instance and start this one again. Deleting the file will not help: "+
+				"it discards every stored session.", dbPath)
+		}
+		log.Fatalf("❌ Failed to open database %s (is the directory %s writable?): %v", dbPath, filepath.Dir(dbPath), err)
 	}
 
 	err = db.Update(func(tx *bbolt.Tx) error {
@@ -89,6 +173,9 @@ func (s *Store) Close() {
 	s.db.Close()
 }
 
+// GetOrCreate reads a session without taking a write lock. It used to open a
+// write transaction for every read, which meant an fsync on nearly every update
+// (this is called several times per message) and let the DB mmap creep upward.
 func (s *Store) GetOrCreate(userID int64) *SessionData {
 	sess := &SessionData{
 		Language: "en",
@@ -97,29 +184,48 @@ func (s *Store) GetOrCreate(userID int64) *SessionData {
 		JoinedAt: time.Now().Format(time.RFC3339),
 	}
 
-	err := s.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte("sessions"))
-		data := b.Get(itob(userID))
+	var found bool
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		data := tx.Bucket([]byte("sessions")).Get(itob(userID))
 		if data == nil {
-			encoded, err := json.Marshal(sess)
-			if err != nil {
-				return err
-			}
-			return b.Put(itob(userID), encoded)
+			return nil
 		}
+		found = true
 		return json.Unmarshal(data, sess)
 	})
 	if err != nil {
 		log.Printf("session GetOrCreate error: %v", err)
-		sess.Language = "en"
-		sess.State = "idle"
-		sess.Data = make(map[string]interface{})
+		return &SessionData{Language: "en", State: "idle", Data: make(map[string]interface{}), JoinedAt: sess.JoinedAt}
+	}
+	if found {
+		if sess.Data == nil {
+			sess.Data = make(map[string]interface{})
+		}
+		return sess
+	}
+
+	// Two updates for the same brand new user can both read "missing" above, and
+	// the one that finishes last would overwrite whatever the other had already
+	// stored, losing the state it had set. The existence check is repeated inside
+	// the write transaction, so only the first of them creates the session.
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("sessions"))
+		if b.Get(itob(userID)) != nil {
+			return nil
+		}
+		encoded, err := json.Marshal(sess)
+		if err != nil {
+			return err
+		}
+		return b.Put(itob(userID), encoded)
+	}); err != nil {
+		log.Printf("session create error: %v", err)
 	}
 	return sess
 }
 
-func (s *Store) saveSession(userID int64, sess *SessionData) {
-	err := s.db.Update(func(tx *bbolt.Tx) error {
+func (s *Store) saveSession(userID int64, sess *SessionData) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte("sessions"))
 		encoded, err := json.Marshal(sess)
 		if err != nil {
@@ -127,27 +233,40 @@ func (s *Store) saveSession(userID int64, sess *SessionData) {
 		}
 		return b.Put(itob(userID), encoded)
 	})
-	if err != nil {
-		log.Printf("session save error: %v", err)
-	}
 }
 
 func (s *Store) SetLanguage(userID int64, lang string) {
 	sess := s.GetOrCreate(userID)
 	sess.Language = lang
-	s.saveSession(userID, sess)
+	if err := s.saveSession(userID, sess); err != nil {
+		log.Printf("session save error: %v", err)
+	}
 }
 
 func (s *Store) SetState(userID int64, state string) {
 	sess := s.GetOrCreate(userID)
 	sess.State = state
-	s.saveSession(userID, sess)
+	if err := s.saveSession(userID, sess); err != nil {
+		log.Printf("session save error: %v", err)
+	}
 }
 
 func (s *Store) SetSessionData(userID int64, data map[string]interface{}) {
 	sess := s.GetOrCreate(userID)
 	sess.Data = data
-	s.saveSession(userID, sess)
+	if err := s.saveSession(userID, sess); err != nil {
+		log.Printf("session save error: %v", err)
+	}
+}
+
+// ClearSessionData drops transient payloads (API blobs, cached URLs) that would
+// otherwise sit in the DB until the session expires.
+func (s *Store) ClearSessionData(userID int64) {
+	sess := s.GetOrCreate(userID)
+	sess.Data = make(map[string]interface{})
+	if err := s.saveSession(userID, sess); err != nil {
+		log.Printf("session save error: %v", err)
+	}
 }
 
 func (s *Store) TrackUser(id int64, firstName, lastName, username string) {

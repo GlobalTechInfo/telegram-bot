@@ -25,16 +25,51 @@ menu is hidden in channels, where only channel admin actions apply.
 
 ## Features
 
+### 🦑 Kraken, the AI agent
+
+Any message that is not a command, a link or a pending prompt is answered by
+**Kraken**, Qasim's personal AI agent. It replies in whichever of the 13
+languages the chat is set to, and is tuned to answer like a person rather than a
+help desk.
+
+- **Private chats**: answers every message, on by default.
+- **Groups**: quiet unless you reply to it or @mention it, off by default.
+- `/ai on`, `/ai off`, `/ai status` — or the Kraken row in **Settings**, per chat.
+- Replies carry no bot prefix and no buttons, so it reads like a person typing.
+
+```bash
+AI_BASE_URL=https://mistral.stacktoy.workers.dev
+AI_KEY=your-key-here
+```
+
+The key is read from the environment only; `config.json` ships with an empty
+`ai.apiKey` so no secret is committed. Without `AI_KEY` the agent stays silent
+and everything else keeps working.
+
+Run `/ai status` in Telegram to confirm the endpoint is reachable; it reports
+which setting is missing when it is not.
+
 ### 📥 Media Downloaders
 | Platform | Formats |
 |----------|---------|
 | **YouTube** | mp3, 360p, 720p, 1080p |
-| **Instagram** | Posts, reels |
+| **Instagram** | Posts (single image or full carousel, delivered as albums of 10, up to 50 items), reels |
 | **TikTok** | No watermark, HD, music audio |
 | **Facebook** | Dynamic quality selection |
 | **Pinterest** | Videos |
 | **Snapchat** | Stories, spotlight |
 | **Twitter/X** | Media downloads |
+| **Threads** | Posts and carousels |
+| **GitHub** | Public repository as a zip (`/gh`, link must be `owner/repo`) |
+| **Vidsplay** | Stock video clips |
+| **Odysee** | Video posts |
+| **iStock / Alamy** | Stock photos |
+| **CapCut** | Template clips |
+| **IMDb** | Trailers |
+
+A pasted link from any of these sites starts the download on its own. GitHub is the
+exception: use `/gh` or the menu, since a pasted `github.com` link is usually a file
+or issue rather than a request to download a repository.
 
 ### 🛡️ Group & Channel Administration
 Reply to a message, or pass `@username`, to act on a member.
@@ -153,6 +188,13 @@ DB_PATH=/bot/data/bot.db
 | `API_KEY` | No | Overrides `apiKey` in config.json |
 | `DB_PATH` | No | BoltDB file path (default: `./bot.db`) |
 | `PORT` | No | Health-check port (default: `8080`) |
+| `MEM_LIMIT_MB` | No | Go soft memory limit in MB (default: `400`) — lower it on a 512MB instance |
+| `GC_PERCENT` | No | `GOGC` target (default: `50`) — trades CPU for a smaller heap |
+| `AI_BASE_URL` | No | Overrides `ai.apiBaseUrl` in config.json |
+| `AI_KEY` | **Yes** for AI chat | Key for the AI agent endpoint — deliberately blank in config.json |
+
+Commands listed in `config.json` with `enabled: true` are published to Telegram's
+slash menu on startup, so they show up in the client without manual setup.
 
 #### config.json
 
@@ -327,7 +369,8 @@ Port comes from `$PORT`, defaulting to `8080`.
 | `/mute` | Group admin | Mute the replied-to user |
 | `/promote` | Group admin | Promote a user to admin |
 | `/demote` | Group admin | Remove admin from a user |
-| `/del` | Group admin | Delete a message (reply) or the last 1–100 |
+| `/ai` | Anyone | Turn Kraken on or off for this chat, or check its state |
+| `/del` | Group admin | Delete a message (reply) or the last 1–100 (batched, paced to stay under Telegram's flood limit) |
 | `/invite` | Group admin | Create and post an invite link |
 | `/welcome` | Group admin | Set the new-member welcome message |
 | `/ginfo` | Group admin | Show group info |
