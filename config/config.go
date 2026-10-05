@@ -77,6 +77,16 @@ type Owner struct {
 	ID       int64  `json:"id"`
 }
 
+type AIConfig struct {
+	Enabled         bool   `json:"enabled"`
+	Name            string `json:"name"`
+	Owner           string `json:"owner"`
+	ApiBaseURL      string `json:"apiBaseUrl"`
+	ApiKey          string `json:"apiKey"`
+	MaxInputChars   int    `json:"maxInputChars"`
+	CooldownSeconds int    `json:"cooldownSeconds"`
+}
+
 type Config struct {
 	Bot          BotConfig                `json:"bot"`
 	Owner        Owner                    `json:"owner"`
@@ -88,6 +98,40 @@ type Config struct {
 	UI           UI                       `json:"ui"`
 	ApiBaseURL   string                   `json:"apiBaseUrl"`
 	ApiKey       string                   `json:"apiKey"`
+	AI           AIConfig                 `json:"ai"`
+}
+
+// EffectiveAiBaseURL prefers the environment over config.json.
+func (c *Config) EffectiveAiBaseURL() string {
+	if v := os.Getenv("AI_BASE_URL"); v != "" {
+		return v
+	}
+	return c.AI.ApiBaseURL
+}
+
+// EffectiveAiKey prefers the environment. The key is deliberately blank in
+// config.json so it never reaches the repository; AI_KEY must be set.
+func (c *Config) EffectiveAiKey() string {
+	if v := os.Getenv("AI_KEY"); v != "" {
+		return v
+	}
+	return c.AI.ApiKey
+}
+
+// AiReady reports whether the AI agent can be used at all.
+func (c *Config) AiReady() bool {
+	if !c.AI.Enabled {
+		return false
+	}
+	return c.EffectiveAiBaseURL() != "" && c.EffectiveAiKey() != ""
+}
+
+// AiName is the agent's display name, with a safe default.
+func (c *Config) AiName() string {
+	if c.AI.Name == "" {
+		return "Kraken"
+	}
+	return c.AI.Name
 }
 
 func (c *Config) EffectiveApiBaseURL() string {

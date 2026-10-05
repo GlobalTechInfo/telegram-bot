@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -525,10 +526,137 @@ func (h *Handler) deleteMsg(chatID int64, msgID int) bool {
 	if msgID == 0 {
 		return false
 	}
-	if _, err := h.bot.Request(tgbotapi.DeleteMessageConfig{ChatID: chatID, MessageID: msgID}); err != nil {
+	_, err := h.bot.Request(tgbotapi.DeleteMessageConfig{ChatID: chatID, MessageID: msgID})
+	return h.handleDelErr(err)
+}
+
+// deleteBatch removes up to 100 messages in one call. tgbotapi has no config
+// for deleteMessages, so the raw endpoint is used. Telegram silently skips ids
+// it cannot remove, so a successful call means the batch was accepted.
+func (h *Handler) deleteBatch(chatID int64, ids []int) bool {
+	if len(ids) == 0 {
 		return false
 	}
-	return true
+	if len(ids) > delBatchMax {
+		ids = ids[:delBatchMax]
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return false
+	}
+	params := tgbotapi.Params{
+		"chat_id":     strconv.FormatInt(chatID, 10),
+		"message_ids": string(list),
+	}
+	for attempt := 0; attempt < delBatchRetries; attempt++ {
+		_, err := h.bot.MakeRequest("deleteMessages", params)
+		if err == nil {
+			return true
+		}
+		if wait := retryAfter(err); wait > 0 {
+			log.Printf("deleteMessages flood wait %ds (batch %d)", wait, len(ids))
+			time.Sleep(time.Duration(wait) * time.Second)
+			continue
+		}
+		log.Printf("deleteMessages error: %v", err)
+		return false
+	}
+	return false
+}
+
+// deleteMsgs deletes a run of recent message ids and returns how many were
+// accepted by Telegram. Ids are deduped, capped at 100 and sent in paced
+// batches: one deleteMessage per message trips the ~30 msg/s group flood limit
+// almost immediately.
+func (h *Handler) deleteMsgs(chatID int64, ids []int) int {
+	uniq := dedupeIDs(ids)
+	if len(uniq) == 0 {
+		return 0
+	}
+	if len(uniq) > delBatchMax {
+		uniq = uniq[:delBatchMax]
+	}
+
+	deleted := 0
+	for start := 0; start < len(uniq); start += delBatchSize {
+		end := start + delBatchSize
+		if end > len(uniq) {
+			end = len(uniq)
+		}
+		batch := uniq[start:end]
+
+		if h.deleteBatch(chatID, batch) {
+			deleted += len(batch)
+			if end < len(uniq) {
+				time.Sleep(delBatchPause)
+			}
+			continue
+		}
+
+		for _, id := range batch {
+			if h.deleteMsg(chatID, id) {
+				deleted++
+			}
+			time.Sleep(delSinglePause)
+		}
+	}
+	if deleted < len(uniq) {
+		log.Printf("purge: %d/%d ids removed (rest older than 48h, service messages or not the bot's)", deleted, len(uniq))
+	}
+	return deleted
+}
+
+// dedupeIDs keeps the original order and drops non-positive and repeat ids.
+func dedupeIDs(ids []int) []int {
+	seen := make(map[int]bool, len(ids))
+	out := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// recentIDs builds the run of message ids ending at last, oldest last.
+func recentIDs(last, count int) []int {
+	if count > delBatchMax {
+		count = delBatchMax
+	}
+	if count < 1 {
+		count = 1
+	}
+	ids := make([]int, 0, count)
+	for i := 0; i < count; i++ {
+		ids = append(ids, last-i)
+	}
+	return ids
+}
+
+// retryAfter pulls the flood-wait hint out of a Telegram API error, in seconds.
+func retryAfter(err error) int {
+	var apiErr *tgbotapi.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.ResponseParameters.RetryAfter
+	}
+	return 0
+}
+
+// handleDelErr logs a failed delete and reports whether it was a flood wait.
+func (h *Handler) handleDelErr(err error) bool {
+	if err == nil {
+		return true
+	}
+	if wait := retryAfter(err); wait > 0 {
+		time.Sleep(time.Duration(wait) * time.Second)
+		return false
+	}
+	if !strings.Contains(err.Error(), "message to delete not found") {
+		log.Printf("delete error: %v", err)
+	}
+	return false
 }
 
 func (h *Handler) FireReminders() {
@@ -950,27 +1078,6 @@ func promptKeyFor(action string) string {
 		return "remindPrompt"
 	}
 	return "error"
-}
-
-// downloadPromptKey maps a downloader id to its prompt string key.
-func downloadPromptKey(id string) (string, bool) {
-	switch id {
-	case "yt":
-		return "ytPrompt", true
-	case "ig":
-		return "igPrompt", true
-	case "tt":
-		return "ttPrompt", true
-	case "fb":
-		return "fbPrompt", true
-	case "pin":
-		return "pinPrompt", true
-	case "sc":
-		return "scPrompt", true
-	case "tw":
-		return "twPrompt", true
-	}
-	return "", false
 }
 
 // inviteMessage renders the invite-link reply. Kept separate so the exact text
