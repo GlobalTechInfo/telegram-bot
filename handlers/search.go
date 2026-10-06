@@ -395,12 +395,16 @@ func (h *Handler) sendSearchSports(s searcher, chatID int64, items []interface{}
 		if name == "" && status == "" {
 			continue
 		}
-		b.WriteString("\n• " + h.p(name))
+		// h.p() prepends the bot name and a blank line, and sendMsg applies it
+		// to the whole message anyway — so calling it per line repeated the
+		// prefix once per fixture. Escaped for the same reason as the news
+		// headlines: this is a third-party feed, and sendMsg sends as Markdown.
+		b.WriteString("\n• " + escapeMarkdown(name))
 		if status != "" {
-			b.WriteString("\n  " + h.p(status))
+			b.WriteString("\n  " + escapeMarkdown(status))
 		}
 		if details != "" {
-			b.WriteString("\n  " + h.p(details))
+			b.WriteString("\n  " + escapeMarkdown(details))
 		}
 		b.WriteString("\n")
 	}

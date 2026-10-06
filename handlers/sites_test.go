@@ -1312,20 +1312,70 @@ func TestAntiCapsWarnsThenMutes(t *testing.T) {
 	h.store.SetGroup(g)
 
 	shout := "THIS IS DEFINITELY SHOUTING AT EVERYONE"
-	for i := 1; i <= warnLimit; i++ {
+	for i := 1; i < warnLimit; i++ {
 		h.trackMessageID(chat, user, shout, "en", 100+i)
-		if got := h.store.GetGroup(chat.ID).WarnCount; got != i {
-			t.Errorf("after %d shouts WarnCount = %d, want %d", i, got, i)
+		if got := h.store.GetGroup(chat.ID).CapsWarnCount(int64(user.ID)); got != i {
+			t.Errorf("after %d shouts the count is %d, want %d", i, got, i)
 		}
 	}
+	h.trackMessageID(chat, user, shout, "en", 100+warnLimit)
 	if len(api.callsFor("restrictChatMember")) == 0 {
 		t.Error("the last shout should mute the sender")
 	}
+	// Cleared on mute, so the user starts fresh once the mute lifts.
+	if got := h.store.GetGroup(chat.ID).CapsWarnCount(int64(user.ID)); got != 0 {
+		t.Errorf("the count should reset after a mute, got %d", got)
+	}
 
-	// One normal message resets the streak.
+	// One normal message resets that sender's streak and nobody else's.
+	other := &tgbotapi.User{ID: 44}
+	g = h.store.GetGroup(chat.ID)
+	g.AntiCaps = true
+	g.BumpCapsWarn(int64(other.ID))
+	h.store.SetGroup(g)
+
 	h.trackMessageID(chat, user, "all right then", "en", 200)
-	if got := h.store.GetGroup(chat.ID).WarnCount; got != 0 {
-		t.Errorf("a normal message must reset WarnCount, got %d", got)
+	g = h.store.GetGroup(chat.ID)
+	if got := g.CapsWarnCount(int64(user.ID)); got != 0 {
+		t.Errorf("a normal message must reset the sender's count, got %d", got)
+	}
+	if got := g.CapsWarnCount(int64(other.ID)); got != 1 {
+		t.Errorf("another user's count must be untouched, got %d", got)
+	}
+}
+
+// The counter is per sender. Three people shouting once each must not mute the
+// third of them: that was the failure a single shared number produced.
+func TestAntiCapsCountsEachSenderSeparately(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":              {okMe},
+		"sendMessage":        {`{"ok":true,"result":{}}`},
+		"restrictChatMember": {`{"ok":true,"result":{}}`},
+		"deleteMessage":      {`{"ok":true,"result":true}}`},
+	}}
+	h := igHandler(t, api, "https://api.test")
+	chat := &tgbotapi.Chat{ID: -5003, Type: "supergroup", Title: "Test"}
+
+	g := h.store.GetGroup(chat.ID)
+	g.AntiCaps = true
+	h.store.SetGroup(g)
+
+	shout := "THIS IS DEFINITELY SHOUTING AT EVERYONE"
+	ids := []int64{101, 102, 103}
+	for _, id := range ids {
+		h.trackMessageID(chat, &tgbotapi.User{ID: id}, shout, "en", int(id))
+	}
+	if n := len(api.callsFor("restrictChatMember")); n != 0 {
+		t.Errorf("three first offences muted someone: %d mute calls", n)
+	}
+
+	// The same sender shouting again does progress towards a mute.
+	same := &tgbotapi.User{ID: 101}
+	for i := 1; i < warnLimit; i++ {
+		h.trackMessageID(chat, same, shout, "en", 200+i)
+	}
+	if n := len(api.callsFor("restrictChatMember")); n == 0 {
+		t.Error("the same sender shouting repeatedly should be muted")
 	}
 }
 

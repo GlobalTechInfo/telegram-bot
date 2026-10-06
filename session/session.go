@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -63,7 +64,40 @@ type GroupConfig struct {
 	MsgCount   int    `json:"msgCount"`
 	LastActive string `json:"lastActive"`
 	StreamURL  string `json:"streamUrl"`
-	WarnCount  int    `json:"warnCount"`
+	// WarnCount is keyed by user id, not held as a single number. One counter per
+	// chat meant all senders shared it: two people shouting and then a third
+	// shouting would mute that third person on a first offence, and anyone's
+	// ordinary message reset it for everyone, so a persistent shouter was never
+	// muted while the chat carried on around them.
+	WarnCount map[string]int `json:"warnCount,omitempty"`
+}
+
+// CapsWarnCount is how many shouted messages one user has made in this chat.
+func (g GroupConfig) CapsWarnCount(userID int64) int {
+	return g.WarnCount[strconv.FormatInt(userID, 10)]
+}
+
+// BumpCapsWarn raises one user's counter and returns the new value, dropping the
+// entry once it falls back to zero so the map does not grow forever.
+func (g *GroupConfig) BumpCapsWarn(userID int64) int {
+	if g.WarnCount == nil {
+		g.WarnCount = make(map[string]int)
+	}
+	k := strconv.FormatInt(userID, 10)
+	g.WarnCount[k]++
+	n := g.WarnCount[k]
+	if n <= 0 {
+		delete(g.WarnCount, k)
+	}
+	return n
+}
+
+// ClearCapsWarn resets one user's counter, leaving everyone else's alone.
+func (g *GroupConfig) ClearCapsWarn(userID int64) {
+	if g.WarnCount == nil {
+		return
+	}
+	delete(g.WarnCount, strconv.FormatInt(userID, 10))
 }
 
 type Store struct {
@@ -158,7 +192,7 @@ func NewStore(dbPath string) *Store {
 	}
 
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries", "stickers"} {
+		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries", "ai_history"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -259,6 +293,42 @@ func (s *Store) SetSessionData(userID int64, data map[string]interface{}) {
 	sess.Data = data
 	if err := s.saveSession(userID, sess); err != nil {
 		log.Printf("session save error: %v", err)
+	}
+}
+
+// AIHistory and ForgetAIHistory keep Kraken's memory out of sess.Data.
+//
+// It used to live there, and every command that starts a flow replaces that map
+// with an empty one — so opening /qr threw away the conversation without the
+// user asking. A dedicated bucket means clearing command state cannot touch it.
+//
+// The payload is opaque JSON: the turn type belongs to the handlers package.
+func (s *Store) AIHistory(chatID int64) []byte {
+	var out []byte
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket([]byte("ai_history")).Get(itob(chatID))
+		out = append([]byte(nil), v...)
+		return nil
+	})
+	if err != nil {
+		log.Printf("ai history read: %v", err)
+	}
+	return out
+}
+
+func (s *Store) SetAIHistory(chatID int64, encoded []byte) {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("ai_history")).Put(itob(chatID), encoded)
+	}); err != nil {
+		log.Printf("ai history write: %v", err)
+	}
+}
+
+func (s *Store) ForgetAIHistory(chatID int64) {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("ai_history")).Delete(itob(chatID))
+	}); err != nil {
+		log.Printf("ai history delete: %v", err)
 	}
 }
 

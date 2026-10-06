@@ -22,19 +22,33 @@ import (
 // inlineResultsPerQuery bounds one answer.
 const inlineResultsPerQuery = 25
 
-// EnableInline turns on inline mode at startup so the operator does not have to
-// remember BotFather. A failure is a warning, not a fatal error: the bot is still
-// fully usable through its commands.
+// inlinePlaceholderHint is what /setinline asks for. Telegram requires a
+// non-empty placeholder before a bot will accept inline queries.
+const inlinePlaceholderHint = "type something..."
+
+// EnableInline reports whether the bot can answer inline queries at all.
+//
+// It cannot turn the feature on. Inline mode is configured with /setinline in
+// @BotFather and there is no Bot API method for it — the spec has no
+// setInlineMode at all, so the old MakeRequest call here could only ever fail.
+// Sending it was worse than useless: the README told operators they could skip
+// BotFather, so nobody enabled it and no query ever arrived.
+//
+// What this does instead is read the flag getMe already reports and say plainly
+// what to do when it is off.
 func (h *Handler) EnableInline() {
 	if !h.cfg.Tools.Inline.Enabled {
 		return
 	}
-	// tgbotapi v5 has no SetInlineMode wrapper, and Chattable's methods are
-	// unexported so a custom config type cannot be built. The raw form works,
-	// exactly as it does for the batched deleteMessages call.
-	params := tgbotapi.Params{"enabled": "true"}
-	if _, err := h.bot.MakeRequest("setInlineMode", params); err != nil {
-		log.Printf("⚠️ Could not enable inline mode: %v (set it in BotFather too)", err)
+	me, err := h.bot.GetMe()
+	if err != nil {
+		log.Printf("⚠️ Could not read bot identity to check inline mode: %v", err)
+		return
+	}
+	if !me.SupportsInlineQueries {
+		log.Printf("⚠️ Inline mode is OFF. Run /setinline in @BotFather "+
+			"(placeholder: %s) — inline queries will not arrive until you do.",
+			inlinePlaceholderHint)
 		return
 	}
 	log.Printf("🔗 Inline mode enabled")
@@ -223,11 +237,17 @@ func inlineResultTitle(title, source string) string {
 	if t == "" {
 		return source
 	}
-	if len(t) > 90 {
-		t = string([]rune(t)[:90]) + "…"
+	// Counted in runes, not bytes. len(t) is bytes, so a 40-character Urdu,
+	// Hindi or Japanese title can exceed 90 bytes while holding fewer than 90
+	// runes — and slicing runes to 90 then panicked on every inline query.
+	if r := []rune(t); len(r) > inlineTitleMaxRunes {
+		t = string(r[:inlineTitleMaxRunes]) + "…"
 	}
 	return t
 }
+
+// inlineTitleMaxRunes is the result title budget.
+const inlineTitleMaxRunes = 90
 
 func inlineResultDescription(item map[string]interface{}, s searcher) string {
 	parts := []string{s.name}

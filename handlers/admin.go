@@ -563,25 +563,29 @@ func (h *Handler) trackMessageID(chat *tgbotapi.Chat, user *tgbotapi.User, text 
 	}
 
 	upper := upperRatio(text)
+	// Counted per user, not per chat. A shared counter let a third person be
+	// muted on a first offence because two others had shouted, and let anyone's
+	// ordinary message clear a persistent shouter's tally.
 	if g.AntiCaps && upper >= antiCapsRatio && letters(text) >= antiCapsMinLetters {
-		g.WarnCount++
+		warns := g.BumpCapsWarn(int64(user.ID))
 		h.store.SetGroup(g)
-		if g.WarnCount >= warnLimit {
+		if warns >= warnLimit {
 			if err := h.setMute(chat.ID, int64(user.ID), true); err == nil {
 				h.deleteMsg(chat.ID, msgID)
 				h.sendMsg(chat.ID, localization.Get("gMuted", lang), emptyKB)
 			}
+			g.ClearCapsWarn(int64(user.ID))
+			h.store.SetGroup(g)
 			return
 		}
-		remaining := warnLimit - g.WarnCount
-		h.sendMsg(chat.ID, localization.Get("gWarned", lang, remaining), emptyKB)
+		h.sendMsg(chat.ID, localization.Get("gWarned", lang, warnLimit-warns), emptyKB)
 		return
 	}
 
-	// One tolerated message resets the counter, so an occasional shout is not
-	// carried over to a later one.
-	if g.WarnCount > 0 {
-		g.WarnCount = 0
+	// One tolerated message resets that sender's counter, so an occasional shout
+	// is not carried over to a later one. Nobody else's is touched.
+	if g.CapsWarnCount(int64(user.ID)) > 0 {
+		g.ClearCapsWarn(int64(user.ID))
 		h.store.SetGroup(g)
 	}
 
@@ -1117,11 +1121,15 @@ func (h *Handler) fetchReddit(chatID, uid int64, sub, lang string) {
 			b.WriteString("\n" + h.p(link))
 		}
 
+		// A URL button, not a data button. callback_data is capped at 64 bytes
+		// and a reddit permalink runs past that, so the whole sendMessage was
+		// rejected with BUTTON_DATA_INVALID; a short one produced a callback no
+		// handler serves, so the button did nothing either way.
 		var kb tgbotapi.InlineKeyboardMarkup
 		if link := p.link(); link != "" {
 			kb = tgbotapi.NewInlineKeyboardMarkup(
 				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData(localization.Get("redditOpen", lang), link),
+					tgbotapi.NewInlineKeyboardButtonURL(localization.Get("redditOpen", lang), link),
 				),
 			)
 		}

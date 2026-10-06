@@ -88,12 +88,12 @@ const (
 	// aiMemoryRunes caps the rendered transcript, because the endpoint rejects
 	// anything past 4000 characters in one text parameter.
 	aiMemoryRunes = 1200
-	// aiTotalRunes leaves room for the user's own message and the scaffolding.
-	aiTotalRunes = 3400
 )
 
-// aiTurn is one remembered exchange, stored in the session so it survives a
-// restart and stays out of the database's other buckets.
+// aiTurn is one remembered exchange. It lives in the ai_history bucket rather
+// than in sess.Data, because every command that starts a flow replaces that map
+// with an empty one: storing memory there meant opening /qr threw the
+// conversation away without the user asking for it.
 type aiTurn struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
@@ -101,49 +101,44 @@ type aiTurn struct {
 
 // aiHistory reads the remembered turns for a chat.
 func (h *Handler) aiHistory(chatID int64) []aiTurn {
-	sess := h.store.GetOrCreate(chatID)
-	raw, _ := sess.Data["ai_history"].([]interface{})
-	out := make([]aiTurn, 0, len(raw))
-	for _, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		role, _ := m["role"].(string)
-		text, _ := m["text"].(string)
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
-		out = append(out, aiTurn{Role: role, Text: text})
+	raw := h.store.AIHistory(chatID)
+	if len(raw) == 0 {
+		return nil
 	}
-	return out
+	var out []aiTurn
+	if err := json.Unmarshal(raw, &out); err != nil {
+		log.Printf("ai history parse: %v", err)
+		return nil
+	}
+	kept := out[:0]
+	for _, t := range out {
+		if strings.TrimSpace(t.Text) != "" {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 // rememberAiTurn appends an exchange and trims the history back to the cap.
 func (h *Handler) rememberAiTurn(chatID int64, user, reply string) {
-	sess := h.store.GetOrCreate(chatID)
-	history := h.aiHistory(chatID)
-	history = append(history,
+	history := append(h.aiHistory(chatID),
 		aiTurn{Role: "user", Text: user},
 		aiTurn{Role: "agent", Text: reply})
 	if len(history) > aiMemoryTurns {
 		history = history[len(history)-aiMemoryTurns:]
 	}
-
-	stored := make([]interface{}, 0, len(history))
-	for _, t := range history {
-		stored = append(stored, map[string]interface{}{"role": t.Role, "text": t.Text})
+	encoded, err := json.Marshal(history)
+	if err != nil {
+		log.Printf("ai history encode: %v", err)
+		return
 	}
-	sess.Data["ai_history"] = stored
-	h.store.SetSessionData(chatID, sess.Data)
+	h.store.SetAIHistory(chatID, encoded)
 }
 
 // forgetAI clears a chat's memory, which is the point at which a user should be
 // able to say the conversation is not wanted any more.
 func (h *Handler) forgetAI(chatID int64) {
-	sess := h.store.GetOrCreate(chatID)
-	delete(sess.Data, "ai_history")
-	h.store.SetSessionData(chatID, sess.Data)
+	h.store.ForgetAIHistory(chatID)
 }
 
 // renderAIHistory formats the remembered turns as a short transcript, newest
@@ -188,24 +183,53 @@ func renderAIHistory(history []aiTurn) string {
 // It deliberately does not add the language line. aiReply applies that on the way
 // out, and doing it in both places doubled it on the first message of a chat
 // while leaving the history prompt with the history framing only.
-func aiPromptWithHistory(text string, history []aiTurn) string {
+func aiPromptWithHistory(text string, history []aiTurn, budget int) string {
 	past := renderAIHistory(history)
 	if past == "" {
 		return text
 	}
 
-	combined := "Earlier in this chat:\n" + past + "\nNew message: " + text
-	if r := []rune(combined); len(r) > aiTotalRunes {
-		// The newest message is what matters, so drop the history rather than
-		// truncating the question.
+	const (
+		head = "Earlier in this chat:\n"
+		tail = "\nNew message: "
+	)
+	// budget is the same limit aiReply truncates to, not aiTotalRunes. Those
+	// differ (2000 vs 3400), so a combined frame could pass here and then be
+	// cut by aiReply — and aiReply keeps the head, which is the history. The
+	// user's actual question was the part that got thrown away.
+	room := budget - len([]rune(head)) - len([]rune(tail)) - len([]rune(text))
+	if room < 0 {
 		return text
 	}
-	return combined
+
+	// Newest turn last, so when the frame does not fit the oldest goes first.
+	for i := len(history); i > 0; i-- {
+		candidate := renderAIHistory(history[len(history)-i:])
+		if len([]rune(head+candidate+tail+text)) > budget {
+			break
+		}
+		past = candidate
+	}
+	if past == "" {
+		return text
+	}
+	return head + past + tail + text
 }
+
+// aiInputLimit is the effective per-request budget, matching aiReply.
+func (h *Handler) aiInputLimit() int {
+	if n := h.cfg.AI.MaxInputChars; n > 0 {
+		return n
+	}
+	return aiDefaultMaxChars
+}
+
+// aiDefaultMaxChars is the fallback request budget.
+const aiDefaultMaxChars = 2000
 
 // chatWithMemory runs one exchange and remembers it.
 func (h *Handler) chatWithMemory(chatID int64, text, lang string) (string, error) {
-	reply, err := h.aiReply(aiPromptWithHistory(text, h.aiHistory(chatID)), lang)
+	reply, err := h.aiReply(aiPromptWithHistory(text, h.aiHistory(chatID), h.aiInputLimit()), lang)
 	if err != nil {
 		return "", err
 	}
@@ -220,10 +244,9 @@ func (h *Handler) aiReply(text, lang string) (string, error) {
 	if base == "" || key == "" {
 		return "", fmt.Errorf("AI agent is not configured")
 	}
-	maxChars := h.cfg.AI.MaxInputChars
-	if maxChars <= 0 {
-		maxChars = 2000
-	}
+	// The same limit aiPromptWithHistory budgets against, so a framed history
+	// can never arrive here already too long and get its question cut.
+	maxChars := h.aiInputLimit()
 	if r := []rune(text); len(r) > maxChars {
 		text = string(r[:maxChars])
 	}

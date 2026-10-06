@@ -808,7 +808,7 @@ func TestAiMemoryRendersIntoThePrompt(t *testing.T) {
 	got := aiPromptWithHistory("what did I ask?", []aiTurn{
 		{Role: "user", Text: "my name is Sam"},
 		{Role: "agent", Text: "nice to meet you Sam"},
-	})
+	}, 2000)
 
 	if !strings.Contains(got, "Sam") {
 		t.Errorf("history missing from the prompt: %q", got)
@@ -826,9 +826,10 @@ func TestAiMemoryIsTrimmedToTheEndpointLimit(t *testing.T) {
 		history = append(history, aiTurn{Role: "user", Text: long}, aiTurn{Role: "agent", Text: long})
 	}
 
-	got := aiPromptWithHistory("and now?", history)
-	if r := []rune(got); len(r) > aiTotalRunes {
-		t.Errorf("prompt is %d runes, over the %d budget", len(r), aiTotalRunes)
+	got := aiPromptWithHistory("and now?", history, 2000)
+
+	if r := []rune(got); len(r) > 2000 {
+		t.Errorf("prompt is %d runes, over the 2000 budget", len(r))
 	}
 	if !strings.HasSuffix(got, "and now?") {
 		t.Error("the newest message must survive trimming")
@@ -846,7 +847,7 @@ func TestAiMemoryDropsHistoryRatherThanTheQuestion(t *testing.T) {
 
 	// A question that leaves under the smallest useful history budget.
 	question := strings.Repeat("q", 3300)
-	got := aiPromptWithHistory(question, history)
+	got := aiPromptWithHistory(question, history, 2000)
 	if got != question {
 		t.Errorf("with no room for history the bare question must be sent, got %d runes", len([]rune(got)))
 	}
@@ -859,15 +860,16 @@ func TestAiMemoryKeepsWhatStillFits(t *testing.T) {
 	for i := 0; i < aiMemoryTurns; i++ {
 		history = append(history, aiTurn{Role: "user", Text: strings.Repeat("y", 400)})
 	}
-	got := aiPromptWithHistory(strings.Repeat("q", 2000), history)
+	question := strings.Repeat("q", 500)
+	got := aiPromptWithHistory(question, history, 2000)
 
-	if r := []rune(got); len(r) > aiTotalRunes {
-		t.Fatalf("prompt is %d runes, over the %d budget", len(r), aiTotalRunes)
+	if r := []rune(got); len(r) > 2000 {
+		t.Fatalf("prompt is %d runes, over the 2000 budget", len(r))
 	}
 	if !strings.Contains(got, "user: ") {
 		t.Error("some history should survive when it fits")
 	}
-	if !strings.HasSuffix(got, strings.Repeat("q", 2000)) {
+	if !strings.HasSuffix(got, question) {
 		t.Error("the question must stay intact at the end")
 	}
 }
@@ -931,8 +933,8 @@ func TestLanguageInstructionAppearsOnce(t *testing.T) {
 		name string
 		text string
 	}{
-		{"first message, no history", aiPrompt("ur", aiPromptWithHistory("salam", nil))},
-		{"with history", aiPrompt("ur", aiPromptWithHistory("aur kya?", history))},
+		{"first message, no history", aiPrompt("ur", aiPromptWithHistory("salam", nil, 2000))},
+		{"with history", aiPrompt("ur", aiPromptWithHistory("aur kya?", history, 2000))},
 	}
 	for _, tc := range cases {
 		if n := strings.Count(tc.text, "Reply in"); n != 1 {
@@ -955,5 +957,59 @@ func TestEnglishGetsNoLanguagePrefix(t *testing.T) {
 		if got := aiPrompt(lang, "hello"); got != "hello" {
 			t.Errorf("lang=%q: got %q, want the bare message", lang, got)
 		}
+	}
+}
+
+// #3: opening a command replaces sess.Data with an empty map. Kraken's memory
+// used to live there, so /qr threw the conversation away without /ai forget.
+func TestAiHistorySurvivesCommandStateReset(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{"getMe": {okMe}}}
+	h := igHandler(t, api, "https://api.test")
+	const chat = 5150
+
+	h.rememberAiTurn(chat, "my name is Sam", "nice to meet you Sam")
+	if len(h.aiHistory(chat)) != 2 {
+		t.Fatalf("history was not stored: %+v", h.aiHistory(chat))
+	}
+
+	// Exactly what /qr and 19 other commands do.
+	h.store.SetSessionData(chat, make(map[string]interface{}))
+
+	if got := h.aiHistory(chat); len(got) != 2 {
+		t.Errorf("command state reset wiped the conversation: %+v", got)
+	}
+
+	h.forgetAI(chat)
+	if got := h.aiHistory(chat); len(got) != 0 {
+		t.Errorf("/ai forget did not clear the conversation: %+v", got)
+	}
+}
+
+// #4: the frame was budgeted against 3400 while aiReply truncates to 2000, and
+// truncation keeps the head — which is the history. The question was the part
+// that got thrown away.
+func TestHistoryFrameNeverExceedsTheRequestLimit(t *testing.T) {
+	history := make([]aiTurn, 0, aiMemoryTurns)
+	for i := 0; i < aiMemoryTurns; i++ {
+		history = append(history,
+			aiTurn{Role: "user", Text: strings.Repeat("h", 300)},
+			aiTurn{Role: "agent", Text: strings.Repeat("a", 300)})
+	}
+
+	const limit = 2000
+	question := "what did I just ask?"
+	got := aiPromptWithHistory(question, history, limit)
+	if n := len([]rune(got)); n > limit {
+		t.Errorf("frame is %d runes, over the %d the endpoint accepts", n, limit)
+	}
+	if !strings.HasSuffix(got, question) {
+		t.Errorf("the question must survive intact, got %q", got)
+	}
+
+	// A question that leaves no room at all must be sent bare, never truncated.
+	long := strings.Repeat("q", limit+500)
+	got = aiPromptWithHistory(long, history, limit)
+	if got != long {
+		t.Errorf("an oversized question must be passed through whole, got %d runes", len([]rune(got)))
 	}
 }

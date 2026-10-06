@@ -178,7 +178,9 @@ func (h *Handler) sendDefineEntry(chatID int64, e dictionaryEntry, lang string) 
 	if audio := e.audioLink(); audio != "" {
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData(localization.Get("definePronounce", lang), audio),
+				// URL button: a pronunciation URL far exceeds the 64-byte
+				// callback_data limit, which cost the whole definition card.
+				tgbotapi.NewInlineKeyboardButtonURL(localization.Get("definePronounce", lang), audio),
 			),
 		)
 	}

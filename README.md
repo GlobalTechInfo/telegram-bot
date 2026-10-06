@@ -147,9 +147,14 @@ Trim asks for its window: send `12` for twelve seconds from the start, or
 
 ### 🎨 Inline Mode
 
-Enabled at startup by the bot itself, so there is nothing to do in BotFather
-beyond the inline placeholder. `@yourbot cat` returns images and videos; picking
-one drops the media into the chat directly, with no download and re-upload.
+**Turn it on in @BotFather** with `/setinline`, and give it a placeholder — that
+is the text shown after you type the bot's name. There is no Bot API method for
+this; inline mode is configured only through BotFather. `@yourbot cat` then
+returns images and videos, and picking one drops the media into the chat directly
+with no download and re-upload.
+
+The bot checks `supports_inline_queries` on startup and logs a warning with the
+exact BotFather command when inline mode is off.
 
 Prefix the query to choose the source:
 
@@ -173,10 +178,16 @@ the chat.
 Unrecognised payloads fall through to the normal welcome, so old links still work.
 
 ```
-https://t.me/YourBot?start=dl|yt|https://youtu.be/VIDEO_ID
-https://t.me/YourBot?start=search|news|gaza
-https://t.me/YourBot?start=chat|define
+dl|yt|https://youtu.be/VIDEO_ID
+search|news|gaza
+chat|define
 ```
+
+Telegram only accepts `A-Z a-z 0-9 _ -` in a `start` parameter, capped at 64
+characters, so the token is base64url-encoded before it goes in the link. A
+destination whose encoded form will not fit — typically a download link with a
+long URL — returns no link, and the caller shows the menu instead of a URL that
+would silently do nothing.
 
 ### 🗞 Channel Digest
 

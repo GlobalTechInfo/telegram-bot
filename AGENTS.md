@@ -48,6 +48,19 @@ and Telegram's default list excludes `channel_post` and `inline_query` — the b
 could not receive channel posts or inline queries at all. The list is explicit
 now.
 
+**Inline mode cannot be enabled from the Bot API.** There is no `setInlineMode`
+method; it is `/setinline` in @BotFather, which asks for a placeholder string.
+`EnableInline` only reads `supports_inline_queries` from getMe and warns with
+that instruction. It used to send a `setInlineMode` request that could only ever
+fail, while the README told operators BotFather was unnecessary.
+
+A link button may never carry a URL in `callback_data`: that field is capped at
+64 bytes, a reddit permalink or pronunciation URL exceeds it, and Telegram
+rejects the whole `sendMessage` with `BUTTON_DATA_INVALID`. Use
+`NewInlineKeyboardButtonURL`. Same rule in the opposite direction: Telegram only
+accepts `A-Za-z0-9_-` in a start parameter, so `deepLinkURL` base64url-encodes
+the token and refuses anything over 64 characters.
+
 ### State Machine
 
 States used in `sess.State`:
@@ -307,8 +320,12 @@ go through `escapeMarkdown` before it reaches a message, or the send is lost.
 
 This is not hypothetical: Google writes a space as `_` in Urdu, so `/translate`
 produced `آپ_کیسے_ہیں`, an unpaired underscore, and Telegram rejected the whole
-message. `translate`, news headlines, `define` and `weather` were all affected.
-`TestTranslateEscapesMarkdown` guards it.
+message. `translate`, news headlines, `define`, `weather` and sports results
+were all affected. `TestTranslateEscapesMarkdown` guards it.
+
+`h.p()` must **not** be called inside a string that will be handed to `sendMsg`
+or `sendPlain`, which prefix the whole message themselves. The sports renderer
+did, so every fixture line carried its own copy of the prefix.
 
 ## Stickers: There Is No Bot Pack
 

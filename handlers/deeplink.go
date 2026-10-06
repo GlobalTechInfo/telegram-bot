@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"encoding/base64"
-	"fmt"
 	"log"
-	"net/url"
 	"strings"
 
 	"telegram-bot/keyboards"
@@ -26,13 +24,30 @@ func deepLinkToken(action string, args ...string) string {
 }
 
 // deepLinkURL renders the shareable link for a destination.
+//
+// The payload is base64url-encoded before it goes in the query. Telegram only
+// allows A-Z, a-z, 0-9, _ and - in a start parameter, so the "|" separators
+// (and any URL inside the token) would be dropped and the link would open the
+// welcome screen instead. It also caps the parameter at 64 characters, which
+// base64url does not fix on its own: a dl|<site>|<url> token with a long URL
+// still overflows, and an over-long parameter is ignored just as silently.
+//
+// An empty result means "this destination cannot be expressed as a link", and
+// the caller should show the menu instead of a link that does nothing.
 func (h *Handler) deepLinkURL(action string, args ...string) string {
 	user := h.cfg.Bot.Username
 	if user == "" {
 		return ""
 	}
-	return fmt.Sprintf("https://t.me/%s?start=%s", user, url.QueryEscape(deepLinkToken(action, args...)))
+	tok := base64.RawURLEncoding.EncodeToString([]byte(deepLinkToken(action, args...)))
+	if len(tok) > deepLinkMaxChars {
+		return ""
+	}
+	return "https://t.me/" + user + "?start=" + tok
 }
+
+// deepLinkMaxChars is Telegram's limit on a start parameter.
+const deepLinkMaxChars = 64
 
 // parseDeepLink reads the payload back out of a /start message.
 //

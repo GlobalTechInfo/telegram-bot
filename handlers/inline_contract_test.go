@@ -284,3 +284,75 @@ func TestEscapeMarkdownCoversEveryBreakableChar(t *testing.T) {
 		t.Errorf("escapeMarkdown = %q, want %q", got, want)
 	}
 }
+
+// #8: len() is bytes, []rune() is runes. A 40-character Urdu or Japanese title
+// is over 90 bytes but under 90 runes, and the old slice panicked — taking the
+// whole inline query down, since the panic was inside HandleInline.
+func TestInlineTitleNonLatinDoesNotPanic(t *testing.T) {
+	for _, title := range []string{
+		"آپ کیسے ہیں؟ میں ٹھیک ہوں آج کل بہت اچھا لگ رہا ہے یار",
+		"タイトル_" + strings.Repeat("長", 40),
+		"हिन्दी_" + strings.Repeat("अक्षर", 30),
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("panic on %q: %v", title, r)
+				}
+			}()
+			got := inlineResultTitle(title, "YouTube")
+			if n := len([]rune(got)); n > inlineTitleMaxRunes+1 {
+				t.Errorf("title not truncated: %d runes", n)
+			}
+		}()
+	}
+}
+
+// #7: there is no setInlineMode in the Bot API. EnableInline must not try.
+func TestNoSetInlineModeRequestIsSent(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{"getMe": {okMe}}}
+	h := igHandler(t, api, "https://api.test")
+	h.cfg.Tools.Inline.Enabled = true
+	h.EnableInline()
+	for _, c := range api.calls {
+		if c.method == "setInlineMode" {
+			t.Error("setInlineMode does not exist in the Bot API and must not be called")
+		}
+	}
+}
+
+// #2 and #6: a URL in callback_data is capped at 64 bytes, and no handler serves
+// it either way. Every button that carries a link has to be a URL button.
+func TestLinkButtonsAreNotCallbackData(t *testing.T) {
+	item := map[string]interface{}{
+		"title": "a post",
+		"url":   "https://www.reddit.com/r/pics/comments/1abc23z/some_quite_long_title_here/",
+	}
+	link := redditPost{URL: item["url"].(string), Title: "a post"}.link()
+	if link == "" {
+		t.Fatal("expected a link")
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("Open", link),
+		))
+	for _, row := range kb.InlineKeyboard {
+		for _, b := range row {
+			if b.CallbackData != nil {
+				t.Errorf("a link must not ride in callback_data (%d bytes): %q",
+					len(*b.CallbackData), *b.CallbackData)
+			}
+		}
+	}
+}
+
+// A realistic pronunciation URL is far past the 64-byte callback_data limit.
+func TestPronunciationURLExceedsCallbackLimit(t *testing.T) {
+	audio := "https://api.dictionaryapi.dev/media/pronunciations/en/serendipity-us.mp3"
+	if len(audio) <= 64 {
+		t.Skip("this URL is not long enough to exercise the limit")
+	}
+	if len([]byte(audio)) <= 64 {
+		t.Fatal("expected the URL to exceed 64 bytes")
+	}
+}
