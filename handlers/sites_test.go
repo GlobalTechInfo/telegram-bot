@@ -14,6 +14,10 @@ import (
 	"telegram-bot/config"
 	"telegram-bot/keyboards"
 	"telegram-bot/localization"
+
+	"telegram-bot/session"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // The API refused every request without a key, and this was silently dropped once
@@ -235,13 +239,40 @@ func TestGithubAcceptsOnlyRepositoryURLs(t *testing.T) {
 }
 
 // A github.com link must not start a download on its own.
+// A pasted github.com link is far more often an issue, a file or a release than a
+// request to zip a repository, so github stays out of auto-detection. The old
+// version of this test asserted that the URL *did* resolve and only checked that
+// the flag was set, which is why manualOnly being unread went unnoticed.
 func TestGithubIsNotAutoDetected(t *testing.T) {
-	if dlByHost("https://github.com/octocat/Hello-World").ok != true {
-		t.Fatal("the repo URL itself must still resolve to /gh")
-	}
 	gh := mustDLByID(t, "gh")
 	if !gh.manualOnly {
-		t.Error("gh must be manualOnly")
+		t.Fatal("gh must be manualOnly")
+	}
+
+	for _, u := range []string{
+		"https://github.com/octocat/Hello-World",
+		"https://github.com/octocat/Hello-World/issues",
+		"https://gist.github.com/octocat/deadbeef",
+	} {
+		if hit := dlAutoHit(u); hit.ok || hit.d.id != "" {
+			t.Errorf("%s must not auto-download, resolved to %q", u, hit.d.id)
+		}
+		if dlAutoHost(u) {
+			t.Errorf("%s must not be treated as an auto-detected host", u)
+		}
+		// The raw matcher still has to recognise the host, because that is how
+		// /gh validates a link the user pasted in answer to its prompt.
+		if !dlHasHost(u) && u != "https://gist.github.com/octocat/deadbeef" {
+			t.Errorf("%s should still be a known host for /gh validation", u)
+		}
+	}
+
+	// The command and the menu still reach it, which is the whole point.
+	if _, ok := dlByCmd("gh"); !ok {
+		t.Error("/gh must still resolve as a command")
+	}
+	if hit := dlAutoHit("https://www.instagram.com/p/x/"); !hit.ok || hit.d.id != "ig" {
+		t.Error("ordinary sites must still auto-detect")
 	}
 }
 
@@ -1229,5 +1260,209 @@ func TestMalformedApiResponseDoesNotPanic(t *testing.T) {
 				t.Error("the user should be told the download failed")
 			}
 		})
+	}
+}
+
+// Lockdown used to call deleteMsg with message id 0, which the API rejects, so
+// it muted the sender and left the message standing.
+func TestLockdownDeletesTheMessageItIsPolicing(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":              {okMe},
+		"sendMessage":        {`{"ok":true,"result":{}}`},
+		"restrictChatMember": {`{"ok":true,"result":{}}`},
+		"deleteMessage":      {`{"ok":true,"result":true}}`},
+	}}
+	h := igHandler(t, api, "https://api.test")
+
+	chat := &tgbotapi.Chat{ID: -5001, Type: "supergroup", Title: "Test"}
+	user := &tgbotapi.User{ID: 42}
+	g := h.store.GetGroup(chat.ID)
+	g.Lockdown = true
+	h.store.SetGroup(g)
+
+	h.trackMessageID(chat, user, "hello", "en", 777)
+
+	del := api.callsFor("deleteMessage")
+	if len(del) == 0 {
+		t.Fatal("lockdown must delete the offending message")
+	}
+	if got := del[0].params.Get("message_id"); got != "777" {
+		t.Errorf("deleted message_id = %q, want 777", got)
+	}
+	if len(api.callsFor("restrictChatMember")) == 0 {
+		t.Error("lockdown must still mute the sender")
+	}
+}
+
+// AntiCaps was stored and toggled but never checked, so the README advertised a
+// feature that did nothing.
+func TestAntiCapsWarnsThenMutes(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":              {okMe},
+		"sendMessage":        {`{"ok":true,"result":{}}`},
+		"restrictChatMember": {`{"ok":true,"result":{}}`},
+		"deleteMessage":      {`{"ok":true,"result":true}}`},
+	}}
+	h := igHandler(t, api, "https://api.test")
+	chat := &tgbotapi.Chat{ID: -5002, Type: "supergroup", Title: "Test"}
+	user := &tgbotapi.User{ID: 43}
+
+	g := h.store.GetGroup(chat.ID)
+	g.AntiCaps = true
+	h.store.SetGroup(g)
+
+	shout := "THIS IS DEFINITELY SHOUTING AT EVERYONE"
+	for i := 1; i < warnLimit; i++ {
+		h.trackMessageID(chat, user, shout, "en", 100+i)
+		if got := h.store.GetGroup(chat.ID).CapsWarnCount(int64(user.ID)); got != i {
+			t.Errorf("after %d shouts the count is %d, want %d", i, got, i)
+		}
+	}
+	h.trackMessageID(chat, user, shout, "en", 100+warnLimit)
+	if len(api.callsFor("restrictChatMember")) == 0 {
+		t.Error("the last shout should mute the sender")
+	}
+	// Cleared on mute, so the user starts fresh once the mute lifts.
+	if got := h.store.GetGroup(chat.ID).CapsWarnCount(int64(user.ID)); got != 0 {
+		t.Errorf("the count should reset after a mute, got %d", got)
+	}
+
+	// One normal message resets that sender's streak and nobody else's.
+	other := &tgbotapi.User{ID: 44}
+	g = h.store.GetGroup(chat.ID)
+	g.AntiCaps = true
+	g.BumpCapsWarn(int64(other.ID))
+	h.store.SetGroup(g)
+
+	h.trackMessageID(chat, user, "all right then", "en", 200)
+	g = h.store.GetGroup(chat.ID)
+	if got := g.CapsWarnCount(int64(user.ID)); got != 0 {
+		t.Errorf("a normal message must reset the sender's count, got %d", got)
+	}
+	if got := g.CapsWarnCount(int64(other.ID)); got != 1 {
+		t.Errorf("another user's count must be untouched, got %d", got)
+	}
+}
+
+// The counter is per sender. Three people shouting once each must not mute the
+// third of them: that was the failure a single shared number produced.
+func TestAntiCapsCountsEachSenderSeparately(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":              {okMe},
+		"sendMessage":        {`{"ok":true,"result":{}}`},
+		"restrictChatMember": {`{"ok":true,"result":{}}`},
+		"deleteMessage":      {`{"ok":true,"result":true}}`},
+	}}
+	h := igHandler(t, api, "https://api.test")
+	chat := &tgbotapi.Chat{ID: -5003, Type: "supergroup", Title: "Test"}
+
+	g := h.store.GetGroup(chat.ID)
+	g.AntiCaps = true
+	h.store.SetGroup(g)
+
+	shout := "THIS IS DEFINITELY SHOUTING AT EVERYONE"
+	ids := []int64{101, 102, 103}
+	for _, id := range ids {
+		h.trackMessageID(chat, &tgbotapi.User{ID: id}, shout, "en", int(id))
+	}
+	if n := len(api.callsFor("restrictChatMember")); n != 0 {
+		t.Errorf("three first offences muted someone: %d mute calls", n)
+	}
+
+	// The same sender shouting again does progress towards a mute.
+	same := &tgbotapi.User{ID: 101}
+	for i := 1; i < warnLimit; i++ {
+		h.trackMessageID(chat, same, shout, "en", 200+i)
+	}
+	if n := len(api.callsFor("restrictChatMember")); n == 0 {
+		t.Error("the same sender shouting repeatedly should be muted")
+	}
+}
+
+// Short acronyms are not shouting.
+func TestAntiCapsIgnoresShortAcronyms(t *testing.T) {
+	for _, s := range []string{"OK", "NASA", "lol", "WHY", "BRB"} {
+		if upperRatio(s) >= antiCapsRatio && letters(s) >= antiCapsMinLetters {
+			t.Errorf("%q classified as shouting", s)
+		}
+	}
+	if upperRatio(shoutText) < antiCapsRatio {
+		t.Error("a sustained shout should exceed the ratio")
+	}
+}
+
+const shoutText = "THIS IS DEFINITELY SHOUTING AT EVERYONE"
+
+// /channels used to call ListGroups, so it listed groups and channels was always
+// empty. Channels now carry their own flag in the same bucket.
+func TestChannelsAreTrackedSeparatelyFromGroups(t *testing.T) {
+	store := session.NewStore(filepath.Join(t.TempDir(), "ch.db"))
+	defer store.Close()
+
+	grp := store.GetGroup(-1001)
+	grp.Title = "A Group"
+	store.SetGroup(grp)
+
+	chn := store.GetGroup(-1002)
+	chn.Title = "A Channel"
+	chn.IsChannel = true
+	store.SetGroup(chn)
+
+	groups := store.ListGroups()
+	if len(groups) != 1 || groups[0].Title != "A Group" {
+		t.Fatalf("ListGroups = %v, want only the group", titles(groups))
+	}
+	channels := store.ListChannels()
+	if len(channels) != 1 || channels[0].Title != "A Channel" {
+		t.Fatalf("ListChannels = %v, want only the channel", titles(channels))
+	}
+}
+
+func titles(g []*session.GroupConfig) []string {
+	out := make([]string, 0, len(g))
+	for _, x := range g {
+		out = append(out, x.Title)
+	}
+	return out
+}
+
+// A channel post carries no interactive conversation, so it is recorded and
+// nothing else. Without AllowedUpdates including channel_post the bot never sees
+// one at all.
+func TestChannelPostIsRecorded(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{"getMe": {okMe}}}
+	h := igHandler(t, api, "https://api.test")
+
+	post := &tgbotapi.Message{
+		MessageID: 5,
+		Chat:      &tgbotapi.Chat{ID: -2001, Type: "channel", Title: "News"},
+		Text:      "hello",
+	}
+	h.HandleChannelPost(tgbotapi.Update{ChannelPost: post})
+
+	c := h.store.GetGroup(-2001)
+	if !c.IsChannel {
+		t.Fatal("the channel was not marked as a channel")
+	}
+	if c.Title != "News" {
+		t.Errorf("Title = %q", c.Title)
+	}
+	if c.MsgCount != 1 {
+		t.Errorf("MsgCount = %d, want 1", c.MsgCount)
+	}
+}
+
+// The update filter has to ask for the things the bot handles, or Telegram
+// silently withholds them.
+func TestAllowedUpdatesRequestsWhatTheBotHandles(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, want := range []string{"channel_post", "inline_query", "callback_query"} {
+		if !strings.Contains(src, `"`+want+`"`) {
+			t.Errorf("AllowedUpdates does not request %q", want)
+		}
 	}
 }

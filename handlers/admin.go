@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"telegram-bot/localization"
 
@@ -53,6 +54,22 @@ func (h *Handler) requireGroupAdmin(chat *tgbotapi.Chat, user *tgbotapi.User, la
 	}
 	h.sendMsg(chat.ID, localization.Get("notAdmin", lang), emptyKB)
 	return false
+}
+
+// HandleChannelPost records that the bot is present in a channel and counts the
+// post. Nothing else happens here: a channel has no interactive conversation, so
+// the message and command handlers, which both read update.Message, never see it.
+func (h *Handler) HandleChannelPost(update tgbotapi.Update) {
+	post := update.ChannelPost
+	if post == nil || !h.isChannel(post.Chat) {
+		return
+	}
+	g := h.store.GetGroup(post.Chat.ID)
+	g.Title = post.Chat.Title
+	g.IsChannel = true
+	g.MsgCount++
+	g.LastActive = time.Now().Format(time.RFC3339)
+	h.store.SetGroup(g)
 }
 
 func (h *Handler) requireChannel(chat *tgbotapi.Chat, user *tgbotapi.User, lang string) bool {
@@ -322,20 +339,25 @@ func (h *Handler) cmdChannels(user *tgbotapi.User, lang string) {
 		h.sendMsg(user.ID, localization.Get("noPermission", lang), emptyKB)
 		return
 	}
-	groups := h.store.ListGroups()
-	if len(groups) == 0 {
-		h.sendMsg(user.ID, localization.Get("channelsTitle", lang)+"\n\n0", emptyKB)
+	channels := h.store.ListChannels()
+	if len(channels) == 0 {
+		h.sendMsg(user.ID, localization.Get("channelsNoChannels", lang), emptyKB)
 		return
 	}
 	var b strings.Builder
 	b.WriteString(localization.Get("channelsTitle", lang))
 	b.WriteString("\n\n")
-	for _, g := range groups {
-		title := g.Title
+	for _, c := range channels {
+		title := c.Title
 		if title == "" {
-			title = fmt.Sprintf("%d", g.ChatID)
+			title = fmt.Sprintf("%d", c.ChatID)
 		}
-		b.WriteString(fmt.Sprintf("• %s (%d)\n", title, g.ChatID))
+		b.WriteString(fmt.Sprintf("• %s (%d)\n", title, c.ChatID))
+		b.WriteString(localization.Get("chstatsMsgsShort", lang, c.MsgCount))
+		if c.LastActive != "" {
+			b.WriteString(localization.Get("chstatsSeen", lang, c.LastActive[:min(19, len(c.LastActive))]))
+		}
+		b.WriteString("\n")
 	}
 	h.sendMsg(user.ID, b.String(), emptyKB)
 }
@@ -412,7 +434,24 @@ func (h *Handler) cmdChSettings(chat *tgbotapi.Chat, user *tgbotapi.User, lang s
 	if !h.requireChannel(chat, user, lang) {
 		return
 	}
-	h.sendMsg(chat.ID, localization.Get("chsettingsTitle", lang), emptyKB)
+	g := h.store.GetGroup(chat.ID)
+	g.Title = chat.Title
+	g.IsChannel = true
+	h.store.SetGroup(g)
+
+	var b strings.Builder
+	b.WriteString(localization.Get("chsettingsTitle", lang))
+	b.WriteString("\n\n")
+	b.WriteString(localization.Get("chstatsTitle", lang))
+	b.WriteString("\n")
+	b.WriteString(localization.Get("gstatsMsgs", lang, g.MsgCount))
+	if g.LastActive != "" {
+		b.WriteString("\n")
+		b.WriteString(localization.Get("chstatsLastSeen", lang, g.LastActive[:min(19, len(g.LastActive))]))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(localization.Get("chsettingsHint", lang))
+	h.sendMsg(chat.ID, b.String(), emptyKB)
 }
 
 func (h *Handler) cmdChStats(chat *tgbotapi.Chat, user *tgbotapi.User, lang string) {
@@ -500,6 +539,13 @@ func (h *Handler) onNewMember(chat *tgbotapi.Chat, user *tgbotapi.User, lang str
 
 // trackMessage increments counters and applies anti-spam rules.
 func (h *Handler) trackMessage(chat *tgbotapi.Chat, user *tgbotapi.User, text string, lang string) {
+	h.trackMessageID(chat, user, text, lang, 0)
+}
+
+// trackMessageID is trackMessage with the id of the message being policed.
+// Without it lockdown muted the sender and then asked deleteMsg to remove
+// message 0, which the API rejects, so nothing was ever deleted.
+func (h *Handler) trackMessageID(chat *tgbotapi.Chat, user *tgbotapi.User, text string, lang string, msgID int) {
 	if !h.isChat(chat) || user == nil {
 		return
 	}
@@ -511,15 +557,81 @@ func (h *Handler) trackMessage(chat *tgbotapi.Chat, user *tgbotapi.User, text st
 
 	if g.Lockdown {
 		if err := h.setMute(chat.ID, int64(user.ID), true); err == nil {
-			h.deleteMsg(chat.ID, 0)
+			h.deleteMsg(chat.ID, msgID)
 		}
 		return
 	}
+
+	upper := upperRatio(text)
+	// Counted per user, not per chat. A shared counter let a third person be
+	// muted on a first offence because two others had shouted, and let anyone's
+	// ordinary message clear a persistent shouter's tally.
+	if g.AntiCaps && upper >= antiCapsRatio && letters(text) >= antiCapsMinLetters {
+		warns := g.BumpCapsWarn(int64(user.ID))
+		h.store.SetGroup(g)
+		if warns >= warnLimit {
+			if err := h.setMute(chat.ID, int64(user.ID), true); err == nil {
+				h.deleteMsg(chat.ID, msgID)
+				h.sendMsg(chat.ID, localization.Get("gMuted", lang), emptyKB)
+			}
+			g.ClearCapsWarn(int64(user.ID))
+			h.store.SetGroup(g)
+			return
+		}
+		h.sendMsg(chat.ID, localization.Get("gWarned", lang, warnLimit-warns), emptyKB)
+		return
+	}
+
+	// One tolerated message resets that sender's counter, so an occasional shout
+	// is not carried over to a later one. Nobody else's is touched.
+	if g.CapsWarnCount(int64(user.ID)) > 0 {
+		g.ClearCapsWarn(int64(user.ID))
+		h.store.SetGroup(g)
+	}
+
 	if g.AntiLinks && strings.Contains(text, "http") {
-		if h.deleteMsg(chat.ID, 0) {
+		if h.deleteMsg(chat.ID, msgID) {
 			h.sendMsg(chat.ID, localization.Get("gsettingsToggle", lang, "antiLinks"), emptyKB)
 		}
 	}
+}
+
+// warnLimit is how many shouted messages are tolerated before a mute.
+const warnLimit = 3
+
+// antiCapsRatio and antiCapsMinLetters keep short acronyms ("OK", "NASA") out of
+// the way; only sustained shouting counts.
+const (
+	antiCapsRatio      = 0.7
+	antiCapsMinLetters = 8
+)
+
+func letters(s string) int {
+	n := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			n++
+		}
+	}
+	return n
+}
+
+// upperRatio is the share of letters that are uppercase.
+func upperRatio(s string) float64 {
+	total, upper := 0, 0
+	for _, r := range s {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		total++
+		if unicode.IsUpper(r) {
+			upper++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(upper) / float64(total)
 }
 
 func (h *Handler) deleteMsg(chatID int64, msgID int) bool {
@@ -866,7 +978,8 @@ func (h *Handler) fetchWeather(chatID, uid int64, city, lang string) {
 	if len(c.WeatherDesc) > 0 {
 		desc = c.WeatherDesc[0].Value
 	}
-	msg := localization.Get("weatherResult", lang, city, desc, c.TempC+"C", c.WindspeedKmph+" km/h", c.Humidity+"%")
+	msg := localization.Get("weatherResult", lang, escapeMarkdown(city), escapeMarkdown(desc),
+		c.TempC+"C", c.WindspeedKmph+" km/h", c.Humidity+"%")
 	h.sendMsg(chatID, msg, emptyKB)
 	h.logQuery(uid, "weather", city)
 }
@@ -886,7 +999,12 @@ func (h *Handler) fetchTranslate(chatID, uid int64, text, target, lang string) {
 		h.sendMsg(chatID, localization.Get("translateError", lang), emptyKB)
 		return
 	}
-	msg := localization.Get("translateResult", lang, parsed.Data.DetectedLanguage, parsed.Data.Translation)
+	// Both values come from the translation API, so both can carry Markdown
+	// characters. Google renders a space as "_" in Urdu, which left the message
+	// with an unpaired underscore and made Telegram reject the whole send.
+	msg := localization.Get("translateResult", lang,
+		escapeMarkdown(parsed.Data.DetectedLanguage),
+		escapeMarkdown(parsed.Data.Translation))
 	h.sendMsg(chatID, msg, emptyKB)
 	h.logQuery(uid, "translate", text)
 }
@@ -910,21 +1028,185 @@ func (h *Handler) fetchConvert(chatID, uid int64, amount, from, to, lang string)
 	h.logQuery(uid, "convert", amount+" "+from+" "+to)
 }
 
+// redditPost is one result. The endpoint nests its list under different keys
+// depending on the caller, so the list is picked at runtime rather than declared.
+type redditPost struct {
+	Title     string  `json:"title"`
+	URL       string  `json:"url"`
+	Link      string  `json:"link"`
+	Permalink string  `json:"permalink"`
+	Score     float64 `json:"score"`
+	Comments  float64 `json:"num_comments"`
+	Author    string  `json:"author"`
+	Sub       string  `json:"subreddit"`
+	Thumb     string  `json:"thumbnail"`
+	Img       string  `json:"url_image"`
+}
+
+func (p redditPost) link() string {
+	switch {
+	case strings.HasPrefix(p.URL, "http"):
+		return p.URL
+	case strings.HasPrefix(p.Link, "http"):
+		return p.Link
+	case p.Permalink != "":
+		return "https://www.reddit.com" + p.Permalink
+	}
+	return ""
+}
+
+// fetchReddit renders search results as posts.
+//
+// It used to download the response and send it as reddit.json, which handed the
+// user a file to read instead of the thing they asked for. The endpoint's own
+// error is now reported instead, because a failing upstream used to arrive as an
+// unopenable attachment rather than a message.
 func (h *Handler) fetchReddit(chatID, uid int64, sub, lang string) {
 	apiURL := fmt.Sprintf("%s/reddit/search?query=%s&apiKey=%s",
 		h.cfg.EffectiveApiBaseURL(), url.QueryEscape(sub), h.cfg.EffectiveApiKey())
-	body, _, err := fetchMedia(apiURL)
+	// apiGet, not fetchMedia: fetchMedia follows any URL it finds inside a JSON
+	// body, so it would have chased the first post link and returned a web page.
+	body, err := h.apiGet(apiURL)
 	if err != nil {
-		log.Printf("fetchReddit error: %v", err)
+		log.Printf("reddit: request failed: %v", err)
 		h.sendMsg(chatID, localization.Get("redditError", lang), emptyKB)
 		return
 	}
-	msg := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: "reddit.json", Bytes: body})
-	msg.Caption = h.p(localization.Get("redditSent", lang, sub))
-	if _, err := h.bot.Send(msg); err != nil {
-		log.Printf("fetchReddit send error: %v", err)
+
+	var env struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
 	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(body, &env); err != nil {
+		log.Printf("reddit: decode failed: %v", err)
+		h.sendMsg(chatID, localization.Get("redditError", lang), emptyKB)
+		return
+	}
+	if err := json.Unmarshal(body, &root); err != nil {
+		log.Printf("reddit: decode body failed: %v", err)
+	}
+	if !env.Success {
+		log.Printf("reddit: upstream error: %s", env.Error)
+		msg := localization.Get("redditError", lang)
+		if env.Error != "" {
+			msg = localization.Get("redditFailed", lang, env.Error)
+		}
+		h.sendMsg(chatID, msg, emptyKB)
+		return
+	}
+
+	posts := redditPostsFrom(root)
+	if len(posts) == 0 {
+		h.sendMsg(chatID, localization.Get("redditNoPosts", lang, sub), emptyKB)
+		return
+	}
+
+	if len(posts) > redditMaxPosts {
+		posts = posts[:redditMaxPosts]
+	}
+	sent := 0
+	for _, p := range posts {
+		var b strings.Builder
+		b.WriteString(h.p(localization.Get("redditPost", lang)))
+		if p.Title != "" {
+			b.WriteString("\n" + h.p(localization.Get("redditTitle", lang, p.Title)))
+		}
+		meta := localization.Get("redditMeta", lang, redditInt(int(p.Score)), redditInt(int(p.Comments)))
+		if p.Author != "" {
+			meta = localization.Get("redditMetaAuthor", lang, p.Author, meta)
+		}
+		b.WriteString("\n" + h.p(meta))
+		if link := p.link(); link != "" {
+			b.WriteString("\n" + h.p(link))
+		}
+
+		// A URL button, not a data button. callback_data is capped at 64 bytes
+		// and a reddit permalink runs past that, so the whole sendMessage was
+		// rejected with BUTTON_DATA_INVALID; a short one produced a callback no
+		// handler serves, so the button did nothing either way.
+		var kb tgbotapi.InlineKeyboardMarkup
+		if link := p.link(); link != "" {
+			kb = tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonURL(localization.Get("redditOpen", lang), link),
+				),
+			)
+		}
+		msg := tgbotapi.NewMessage(chatID, b.String())
+		msg.ReplyMarkup = kb
+		if _, err := h.bot.Send(msg); err != nil {
+			log.Printf("reddit send: %v", err)
+			continue
+		}
+		sent++
+	}
+
+	if sent == 0 {
+		h.sendMsg(chatID, localization.Get("redditError", lang), emptyKB)
+		return
+	}
+	h.sendMsg(chatID, localization.Get("redditSent", lang, sub, sent), emptyKB)
 	h.logQuery(uid, "reddit", sub)
+}
+
+// redditPostsFrom finds the post list wherever the endpoint put it.
+func redditPostsFrom(root map[string]interface{}) []redditPost {
+	var out []redditPost
+	for _, key := range []string{"data", "posts", "results", "children", "items"} {
+		raw, ok := root[key]
+		if !ok {
+			continue
+		}
+		// A wrapper object holds the list one level down: Reddit's own API puts
+		// it at data.children.
+		if wrapper, isObj := raw.(map[string]interface{}); isObj {
+			for _, inner := range []string{"children", "posts", "data", "items", "results"} {
+				if list, isList := wrapper[inner].([]interface{}); isList {
+					raw = list
+					ok = true
+					break
+				}
+			}
+		}
+		list, isList := raw.([]interface{})
+		if !ok || !isList {
+			continue
+		}
+		for _, item := range list {
+			obj, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// Reddit's own API nests the post under "data".
+			if inner, ok := obj["data"].(map[string]interface{}); ok {
+				obj = inner
+			}
+			b, err := json.Marshal(obj)
+			if err != nil {
+				continue
+			}
+			var p redditPost
+			if err := json.Unmarshal(b, &p); err != nil {
+				continue
+			}
+			if p.Title == "" && p.link() == "" {
+				continue
+			}
+			out = append(out, p)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return out
+}
+
+// redditMaxPosts keeps one query from filling a chat.
+const redditMaxPosts = 5
+
+func redditInt(n int) string {
+	return strconv.Itoa(n)
 }
 
 func (h *Handler) fetchMeme(chatID, uid int64, template, text1, text2, lang string) {

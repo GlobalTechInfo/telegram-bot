@@ -108,19 +108,34 @@ func readBody(resp *http.Response, limit int) ([]byte, error) {
 }
 
 func (h *Handler) apiGet(apiURL string) ([]byte, error) {
-	req, err := http.NewRequest("GET", apiURL, nil)
+	body, status, err := h.apiGetStatus(apiURL)
 	if err != nil {
 		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("status %d", status)
+	}
+	return body, nil
+}
+
+// apiGetStatus is apiGet for the callers that need to tell a missing resource
+// from a broken request. A dictionary answers 404 for a word it does not have,
+// which is an answer, not a failure.
+func (h *Handler) apiGetStatus(apiURL string) (body []byte, status int, err error) {
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, 0, err
 	}
 	resp, err := mediaClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return nil, resp.StatusCode, fmt.Errorf("status %d", resp.StatusCode)
 	}
-	return readBody(resp, maxDownloadSize)
+	body, err = readBody(resp, maxDownloadSize)
+	return body, resp.StatusCode, err
 }
 
 func (h *Handler) downloadFile(f tgbotapi.File) ([]byte, error) {
@@ -243,6 +258,13 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 
 	switch cmd {
 	case "start":
+		// A shared link carries a payload that names what to open. An unrecognised
+		// payload falls through to the welcome, so old links keep working.
+		if payload := deepLinkPayload(update.Message); payload != "" {
+			if h.handleDeepLink(chat.ID, uid, payload, lang) {
+				return
+			}
+		}
 		ownerDisplay := h.cfg.Owner.Name
 		if h.cfg.Owner.Username != "" {
 			ownerDisplay += " (" + h.cfg.Owner.Username + ")"
@@ -289,6 +311,12 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		h.store.SetSessionData(uid, make(map[string]interface{}))
 		h.sendMsg(chat.ID, localization.Get("weatherPrompt", lang), keyboards.Back(lang))
 	case "translate":
+		// A reply is the useful case: /translate on someone else's message should
+		// translate that, not ask for something to be typed.
+		if replyText := replyTextOf(update.Message); replyText != "" {
+			h.startTranslate(chat.ID, uid, lang, replyText)
+			return
+		}
 		h.store.SetState(uid, "awaiting_translate_text")
 		h.store.SetSessionData(uid, make(map[string]interface{}))
 		h.sendMsg(chat.ID, localization.Get("translatePrompt", lang), keyboards.TranslateLangPicker(lang))
@@ -312,6 +340,10 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 		h.sendMsg(chat.ID, localization.Get("remindPrompt", lang), keyboards.Back(lang))
 	case "history":
 		h.cmdHistory(chat, user, lang)
+	case "define":
+		h.showDefineMenu(chat.ID, lang)
+	case "media":
+		h.showMediaMenu(chat.ID, lang)
 	case "ban", "kick", "mute", "unban", "promote", "admin_add", "demote", "admin_remove":
 		switch cmd {
 		case "ban":
@@ -388,8 +420,51 @@ func (h *Handler) HandleCommand(update tgbotapi.Update) {
 			h.sendMsg(chat.ID, dlText(d, "Prompt", lang), keyboards.Back(lang))
 			return
 		}
+		// These six are advertised in the slash menu and in the help text, so
+		// typing them has to reach the same menus their buttons do. They used to
+		// fall through to the downloader lookup and answer "unknown command".
+		if menu, ok := menuCommands[cmd]; ok {
+			menu(h, chat.ID, lang)
+			return
+		}
 		h.sendMsg(chat.ID, localization.Get("unknownCommand", lang), keyboards.Back(lang))
 	}
+}
+
+// menuCommands are commands whose whole job is to show a submenu. Each one is
+// keyed by the command published in config.json and shares its implementation
+// with the button that reaches the same menu.
+var menuCommands = map[string]func(h *Handler, chatID int64, lang string){
+	"textmaker":   (*Handler).showTextMakerMenu,
+	"shorturl":    (*Handler).showShortUrlMenu,
+	"news":        (*Handler).showNewsMenu,
+	"sports":      (*Handler).showSportsMenu,
+	"imageeffect": (*Handler).showImageEffectMenu,
+	"artistic":    (*Handler).showArtisticMenu,
+}
+
+func (h *Handler) showTextMakerMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("textMakerMenu", lang), keyboards.TextMakerMenu(lang))
+}
+
+func (h *Handler) showShortUrlMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("shortUrlMenu", lang), keyboards.ShortUrlMenu(lang))
+}
+
+func (h *Handler) showNewsMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("newsMenu", lang), keyboards.NewsMenu(lang))
+}
+
+func (h *Handler) showSportsMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("sportsMenu", lang), keyboards.SportsMenu(lang))
+}
+
+func (h *Handler) showImageEffectMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("imageEffectMenu", lang), keyboards.ImageEffectMenu(lang))
+}
+
+func (h *Handler) showArtisticMenu(chatID int64, lang string) {
+	h.sendMsg(chatID, localization.Get("artisticMenu", lang), keyboards.ArtisticEffectMenu(lang))
 }
 
 // downloadMenu lists every enabled downloader, preferring its translated button
@@ -563,9 +638,13 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		h.answerCb(cb.ID, "")
 		h.editMsg(chat.ID, msgID, localization.Get("searchMenu", sess.Language), keyboards.SearchMenu(sess.Language))
 
+	case strings.HasPrefix(data, "media:"):
+		h.answerCb(cb.ID, "")
+		h.applyMediaOp(chat.ID, sess.Language, strings.TrimPrefix(data, "media:"))
+
 	case data == "textmaker":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("textMakerMenu", sess.Language), keyboards.TextMakerMenu(sess.Language))
+		h.showTextMakerMenu(chat.ID, sess.Language)
 
 	case data == "textpro":
 		h.answerCb(cb.ID, "")
@@ -620,7 +699,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "shorturl":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("shortUrlMenu", sess.Language), keyboards.ShortUrlMenu(sess.Language))
+		h.showShortUrlMenu(chat.ID, sess.Language)
 
 	case strings.HasPrefix(data, "shorturl:"):
 		h.answerCb(cb.ID, "")
@@ -650,7 +729,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "news":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("newsMenu", sess.Language), keyboards.NewsMenu(sess.Language))
+		h.showNewsMenu(chat.ID, sess.Language)
 
 	case strings.HasPrefix(data, "news:"):
 		h.answerCb(cb.ID, "")
@@ -678,11 +757,11 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "sports":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("sportsMenu", sess.Language), keyboards.SportsMenu(sess.Language))
+		h.showSportsMenu(chat.ID, sess.Language)
 
 	case data == "imageeffect":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("imageEffectMenu", sess.Language), keyboards.ImageEffectMenu(sess.Language))
+		h.showImageEffectMenu(chat.ID, sess.Language)
 
 	case strings.HasPrefix(data, "imageeffect:"):
 		h.answerCb(cb.ID, "")
@@ -693,7 +772,7 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 
 	case data == "artistic":
 		h.answerCb(cb.ID, "")
-		h.editMsg(chat.ID, msgID, localization.Get("artisticMenu", sess.Language), keyboards.ArtisticEffectMenu(sess.Language))
+		h.showArtisticMenu(chat.ID, sess.Language)
 
 	case strings.HasPrefix(data, "artistic:"):
 		h.answerCb(cb.ID, "")
@@ -863,6 +942,16 @@ func (h *Handler) HandleCallback(update tgbotapi.Update) {
 		sess = h.store.GetOrCreate(uid)
 		sess.Data["tr_target"] = target
 		h.store.SetSessionData(uid, sess.Data)
+
+		// If the text is already known (a reply to /translate), translating can
+		// happen now instead of asking for something already supplied.
+		if pending, _ := sess.Data["tr_text"].(string); pending != "" {
+			h.store.SetState(uid, "idle")
+			h.editMsg(chat.ID, msgID, localization.Get("translating", sess.Language), emptyKB)
+			go h.fetchTranslate(chat.ID, uid, pending, target, sess.Language)
+			return
+		}
+
 		h.store.SetState(uid, "awaiting_translate_text")
 		h.editMsg(chat.ID, msgID, localization.Get("translatePrompt", sess.Language), keyboards.Back(sess.Language))
 
@@ -980,14 +1069,11 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		h.store.SetState(uid, "idle")
 		go h.fetchWeather(chat.ID, uid, text, lang)
 
-	case "awaiting_translate_text":
-		sess = h.store.GetOrCreate(uid)
-		target, _ := sess.Data["tr_target"].(string)
-		if target == "" {
-			target = "en"
-		}
-		h.store.SetState(uid, "idle")
-		go h.fetchTranslate(chat.ID, uid, text, target, lang)
+	// Both halves of /translate. The translate body used to sit under a case
+	// labelled awaiting_define_word, so this state had no case at all and the
+	// typed text fell through to the default branch.
+	case "awaiting_translate_text", "awaiting_translate_lang":
+		h.handleTranslateState(chat, update.Message, uid, lang)
 
 	case "awaiting_convert":
 		parts := strings.Fields(text)
@@ -1050,6 +1136,15 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 		} else {
 			h.sendMsg(chat.ID, localization.Get("banPrompt", lang), emptyKB)
 		}
+
+	case "awaiting_media":
+		h.handleMediaState(chat, update.Message, uid, lang)
+
+	case "awaiting_media_trim":
+		h.handleTrimWindow(chat.ID, text, lang)
+
+	case "awaiting_define_word":
+		h.handleDefineState(chat.ID, text, lang)
 
 	case "awaiting_del":
 		h.store.SetState(uid, "idle")
@@ -1329,13 +1424,26 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 	default:
 		link := dlExtractURL(text)
 		if h.isChat(chat) && h.botIsAdmin(chat.ID) {
-			h.trackMessage(chat, user, text, lang)
+			h.trackMessageID(chat, user, text, lang, update.Message.MessageID)
 		}
+
+		// Several links in one message are downloaded as a batch. This sits before
+		// the single-link path, which would otherwise act on only the first.
+		if len(batchLinks(text)) > 1 {
+			if links := batchLinks(text); len(links) > 1 && batchHasDownloads(links) {
+				go func() {
+					defer h.recoverPanic()
+					h.handleBatch(chat.ID, uid, links, lang)
+				}()
+				return
+			}
+		}
+
 		if update.Message.ForwardFromChat != nil || update.Message.ForwardSenderName != "" {
 			h.sendMsg(chat.ID, localization.Get("forwardProcessing", lang), emptyKB)
 			go h.forwardMedia(chat.ID, uid, update.Message, lang)
-		} else if link != "" && dlHasHost(link) {
-			hit := dlByHost(link)
+		} else if link != "" && dlAutoHost(link) {
+			hit := dlAutoHit(link)
 			switch {
 			case hit.offPath:
 				h.sendMsg(chat.ID, dlText(hit.d, "Unsupported", lang), keyboards.Back(lang))
@@ -1352,31 +1460,6 @@ func (h *Handler) HandleMessage(update tgbotapi.Update) {
 			// Anything else is conversation for the AI agent.
 			h.maybeChatWithAI(chat, user, update.Message, text, lang)
 		}
-	}
-}
-
-func (h *Handler) HandleInline(update tgbotapi.Update) {
-	if update.InlineQuery == nil {
-		return
-	}
-
-	results := make([]interface{}, 0)
-
-	helpResult := tgbotapi.NewInlineQueryResultArticle("1", "Help", "Get help with the bot")
-	helpResult.Description = "Shows help message"
-
-	aboutResult := tgbotapi.NewInlineQueryResultArticle("2", "About", fmt.Sprintf("About %s", h.cfg.Bot.Name))
-	aboutResult.Description = "Learn about this bot"
-
-	results = append(results, helpResult, aboutResult)
-
-	conf := tgbotapi.InlineConfig{
-		InlineQueryID: update.InlineQuery.ID,
-		Results:       results,
-		CacheTime:     0,
-	}
-	if _, err := h.bot.Request(conf); err != nil {
-		log.Printf("inline error: %v", err)
 	}
 }
 
@@ -2121,366 +2204,18 @@ func (h *Handler) fetchBingSearch(chatID int64, query, lang string) {
 }
 
 func (h *Handler) fetchBingImages(chatID int64, query, countStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/bing/image?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	log.Printf("Bing images: %s", query)
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Bing images API error: %v", err)
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Bing images read error: %v", err)
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Bing images JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Bing images API returned success=false")
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Bing images no data")
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-
-	results, _ := data["results"].([]interface{})
-	if len(results) == 0 {
-		log.Printf("Bing images no results")
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 5
-	if countStr == "0" {
-		count = len(results)
-	} else {
-		fmt.Sscanf(countStr, "%d", &count)
-	}
-	if count < 1 {
-		count = 1
-	}
-	if count > len(results) {
-		count = len(results)
-	}
-
-	h.sendMsg(chatID, localization.Get("bingSending", lang), keyboards.Back(lang))
-
-	sent := 0
-	for i := 0; i < count; i++ {
-		item, ok := results[i].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		direct, _ := item["direct"].(string)
-		if direct == "" {
-			continue
-		}
-
-		imgBody, ct, err := fetchMedia(direct)
-		if err != nil {
-			log.Printf("Bing image %d fetch error: %v", i, err)
-			continue
-		}
-
-		ext := ".jpg"
-		if strings.Contains(ct, "png") {
-			ext = ".png"
-		} else if strings.Contains(ct, "gif") {
-			ext = ".gif"
-		} else if strings.Contains(ct, "webp") {
-			ext = ".webp"
-		}
-
-		fileName := fmt.Sprintf("bing_%s_%d%s", time.Now().Format("150405"), i, ext)
-		fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
-
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				log.Printf("Bing image %d send error: %v", i, err)
-			}
-		}
-
-		imgBody = nil
-		sent++
-	}
-
-	if sent == 0 {
-		h.sendMsg(chatID, localization.Get("bingError", lang), keyboards.Back(lang))
-	} else {
-		h.sendMsg(chatID, localization.Get("bingSuccess", lang, sent), keyboards.MainMenu(h.cfg, lang))
-	}
+	s, _ := searcherByID("bing_images")
+	h.runSearcher(s, chatID, chatID, query, clampCount(countStr), lang)
 }
 
 func (h *Handler) fetchPinSearch(chatID int64, query, countStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/pinterest/search?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	log.Printf("Pinterest search: %s", query)
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Pinterest search API error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Pinterest search read error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Pinterest search JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Pinterest search API returned success=false")
-		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	results, _ := result["data"].([]interface{})
-	if len(results) == 0 {
-		log.Printf("Pinterest search no results")
-		h.sendMsg(chatID, localization.Get("bingNoResults", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 5
-	if countStr == "0" {
-		count = len(results)
-	} else {
-		fmt.Sscanf(countStr, "%d", &count)
-	}
-	if count < 1 {
-		count = 1
-	}
-	if count > len(results) {
-		count = len(results)
-	}
-
-	h.sendMsg(chatID, localization.Get("pinSearchSending", lang), keyboards.Back(lang))
-
-	sent := 0
-	for i := 0; i < count; i++ {
-		item, ok := results[i].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		imgURL, _ := item["images_url"].(string)
-		if imgURL == "" {
-			continue
-		}
-
-		imgBody, ct, err := fetchMedia(imgURL)
-		if err != nil {
-			log.Printf("Pinterest img %d fetch error: %v", i, err)
-			continue
-		}
-
-		ext := ".jpg"
-		if strings.Contains(ct, "png") {
-			ext = ".png"
-		} else if strings.Contains(ct, "gif") {
-			ext = ".gif"
-		} else if strings.Contains(ct, "webp") {
-			ext = ".webp"
-		}
-
-		fileName := fmt.Sprintf("pinterest_%s_%d%s", time.Now().Format("150405"), i, ext)
-		fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
-
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				log.Printf("Pinterest img %d send error: %v", i, err)
-			}
-		}
-
-		imgBody = nil
-		sent++
-	}
-
-	if sent == 0 {
-		h.sendMsg(chatID, localization.Get("pinSearchError", lang), keyboards.Back(lang))
-	} else {
-		h.sendMsg(chatID, localization.Get("pinSearchSuccess", lang, sent), keyboards.MainMenu(h.cfg, lang))
-	}
+	s, _ := searcherByID("pin_search")
+	h.runSearcher(s, chatID, chatID, query, clampCount(countStr), lang)
 }
 
 func (h *Handler) fetchStickerSearch(chatID int64, query, countStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/stickers/search?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	log.Printf("Sticker search: %s", query)
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Sticker search API error: %v", err)
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Sticker search read error: %v", err)
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Sticker search JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Sticker search API returned success=false")
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Sticker search no data")
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	res, _ := data["result"].(map[string]interface{})
-	if res == nil {
-		log.Printf("Sticker search no result")
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	resData, _ := res["data"].(map[string]interface{})
-	if resData == nil {
-		log.Printf("Sticker search no result data")
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-		return
-	}
-
-	results, _ := resData["data"].([]interface{})
-	if len(results) == 0 {
-		log.Printf("Sticker search no results")
-		h.sendMsg(chatID, localization.Get("bingNoResults", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 5
-	if countStr == "0" {
-		count = len(results)
-	} else {
-		fmt.Sscanf(countStr, "%d", &count)
-	}
-	if count < 1 {
-		count = 1
-	}
-	if count > len(results) {
-		count = len(results)
-	}
-
-	h.sendMsg(chatID, localization.Get("stickerSending", lang), keyboards.Back(lang))
-
-	sent := 0
-	for i := 0; i < count; i++ {
-		item, ok := results[i].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		file, _ := item["file"].(map[string]interface{})
-		if file == nil {
-			continue
-		}
-
-		imgURL := pickStickerURL(file)
-		if imgURL == "" {
-			continue
-		}
-
-		imgBody, ct, err := fetchMedia(imgURL)
-		if err != nil {
-			log.Printf("Sticker %d fetch error: %v", i, err)
-			continue
-		}
-
-		ext := ".jpg"
-		if strings.Contains(ct, "png") {
-			ext = ".png"
-		} else if strings.Contains(ct, "gif") {
-			ext = ".gif"
-		} else if strings.Contains(ct, "webp") {
-			ext = ".webp"
-		}
-
-		fileName := fmt.Sprintf("sticker_%s_%d%s", time.Now().Format("150405"), i, ext)
-		fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
-
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				log.Printf("Sticker %d send error: %v", i, err)
-			}
-		}
-
-		imgBody = nil
-		sent++
-	}
-
-	if sent == 0 {
-		h.sendMsg(chatID, localization.Get("stickerError", lang), keyboards.Back(lang))
-	} else {
-		h.sendMsg(chatID, localization.Get("stickerSuccess", lang, sent), keyboards.MainMenu(h.cfg, lang))
-	}
+	s, _ := searcherByID("sticker_search")
+	h.runSearcher(s, chatID, chatID, query, clampCount(countStr), lang)
 }
 
 func pickStickerURL(file map[string]interface{}) string {
@@ -2507,269 +2242,13 @@ func pickStickerURL(file map[string]interface{}) string {
 }
 
 func (h *Handler) fetchImgurSearch(chatID int64, query, countStr, lang string) {
-	defer h.recoverPanic()
-	h.acquireDL()
-	defer h.releaseDL()
-
-	apiURL := fmt.Sprintf("%s/imgur/search?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	log.Printf("Imgur search: %s", query)
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Imgur search API error: %v", err)
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Imgur search read error: %v", err)
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Imgur search JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Imgur search API returned success=false")
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Imgur search no data")
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-		return
-	}
-
-	results, _ := data["results"].([]interface{})
-	if len(results) == 0 {
-		log.Printf("Imgur search no results")
-		h.sendMsg(chatID, localization.Get("bingNoResults", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 5
-	if countStr == "0" {
-		count = len(results)
-	} else {
-		fmt.Sscanf(countStr, "%d", &count)
-	}
-	if count < 1 {
-		count = 1
-	}
-	if count > len(results) {
-		count = len(results)
-	}
-
-	h.sendMsg(chatID, localization.Get("imgurSending", lang), keyboards.Back(lang))
-
-	sent := 0
-	for i := 0; i < count; i++ {
-		item, ok := results[i].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		imgURL, _ := item["link"].(string)
-		if imgURL == "" {
-			continue
-		}
-
-		time.Sleep(300 * time.Millisecond)
-		imgBody, ct, err := fetchMedia(imgURL)
-		if err != nil {
-			gifURL, _ := item["link_gif"].(string)
-			if gifURL == "" {
-				continue
-			}
-			time.Sleep(300 * time.Millisecond)
-			imgBody, ct, err = fetchMedia(gifURL)
-			if err != nil {
-				log.Printf("Imgur %d fetch error: %v", i, err)
-				continue
-			}
-		}
-
-		ext := ".jpg"
-		if strings.Contains(ct, "png") {
-			ext = ".png"
-		} else if strings.Contains(ct, "gif") {
-			ext = ".gif"
-		} else if strings.Contains(ct, "webp") {
-			ext = ".webp"
-		} else if strings.Contains(ct, "mp4") {
-			ext = ".mp4"
-		}
-
-		fileName := fmt.Sprintf("imgur_%s_%d%s", time.Now().Format("150405"), i, ext)
-		fileBytes := tgbotapi.FileBytes{Name: fileName, Bytes: imgBody}
-
-		photo := tgbotapi.NewPhoto(chatID, fileBytes)
-		if _, err := h.bot.Send(photo); err != nil {
-			doc := tgbotapi.NewDocument(chatID, fileBytes)
-			if _, err := h.bot.Send(doc); err != nil {
-				log.Printf("Imgur %d send error: %v", i, err)
-			}
-		}
-
-		imgBody = nil
-		sent++
-	}
-
-	if sent == 0 {
-		h.sendMsg(chatID, localization.Get("imgurError", lang), keyboards.Back(lang))
-	} else {
-		h.sendMsg(chatID, localization.Get("imgurSuccess", lang, sent), keyboards.MainMenu(h.cfg, lang))
-	}
+	s, _ := searcherByID("imgur_search")
+	h.runSearcher(s, chatID, chatID, query, clampCount(countStr), lang)
 }
 
 func (h *Handler) fetchYtSearch(chatID int64, query, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/yts/searchVideos?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	log.Printf("YouTube search: %s", query)
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("YouTube search API error: %v", err)
-		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("YouTube search read error: %v", err)
-		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("YouTube search JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("YouTube search API returned success=false")
-		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("YouTube search no data")
-		h.sendMsg(chatID, localization.Get("ytSearchError", lang), keyboards.Back(lang))
-		return
-	}
-
-	videos, _ := data["videos"].([]interface{})
-	if len(videos) == 0 {
-		log.Printf("YouTube search no results")
-		h.sendMsg(chatID, localization.Get("bingNoResults", lang), keyboards.Back(lang))
-		return
-	}
-
-	totalResults, _ := data["total_results"].(float64)
-	msg := fmt.Sprintf("*🎬 YouTube search:* %s", truncate(query, 100))
-	if totalResults > 0 {
-		msg += fmt.Sprintf(" _(results: %.0f)_", totalResults)
-	}
-	msg += "\n\n"
-
-	var rows [][]tgbotapi.InlineKeyboardButton
-	maxResults := 10
-	if len(videos) < maxResults {
-		maxResults = len(videos)
-	}
-
-	for i := 0; i < maxResults; i++ {
-		item, ok := videos[i].(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		title, _ := item["title"].(string)
-		if title == "" {
-			title = fmt.Sprintf("Video %d", i+1)
-		}
-		title = escapeMarkdown(title)
-
-		videoURL, _ := item["url"].(string)
-		desc, _ := item["description"].(string)
-		desc = escapeMarkdown(truncate(desc, 120))
-		published, _ := item["published"].(string)
-		published = escapeMarkdown(published)
-		views, _ := item["views"].(float64)
-		authorData, _ := item["author"].(map[string]interface{})
-		authorName := ""
-		if authorData != nil {
-			authorName, _ = authorData["name"].(string)
-			authorName = escapeMarkdown(authorName)
-		}
-		durationData, _ := item["duration"].(map[string]interface{})
-		duration := ""
-		if durationData != nil {
-			duration, _ = durationData["timestamp"].(string)
-		}
-
-		msg += fmt.Sprintf("*%d.* %s\n", i+1, title)
-		details := ""
-		if views > 0 {
-			details += fmt.Sprintf("👁 %.0f", views)
-		}
-		if duration != "" {
-			if details != "" {
-				details += " | "
-			}
-			details += fmt.Sprintf("⏱ %s", duration)
-		}
-		if authorName != "" {
-			if details != "" {
-				details += " | "
-			}
-			details += fmt.Sprintf("👤 %s", authorName)
-		}
-		if published != "" {
-			if details != "" {
-				details += " | "
-			}
-			details += published
-		}
-		if details != "" {
-			msg += details + "\n"
-		}
-		if desc != "" {
-			msg += truncate(desc, 120) + "\n"
-		}
-		msg += "\n"
-
-		if videoURL != "" {
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonURL(fmt.Sprintf("▶️ %d", i+1), videoURL),
-			))
-		}
-	}
-
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-	))
-
-	h.sendMsg(chatID, msg, tgbotapi.NewInlineKeyboardMarkup(rows...))
+	s, _ := searcherByID("yt_search")
+	h.runSearcher(s, chatID, chatID, query, 0, lang)
 }
 
 func (h *Handler) fetchTextPro(chatID int64, effect, text1, text2, lang string) {
@@ -3060,1034 +2539,88 @@ func (h *Handler) fetchEphoto(chatID int64, effect, text1, text2, lang string) {
 
 func (h *Handler) fetchReurl(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/reurl?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Reurl API error: %v", err)
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Reurl read error: %v", err)
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Reurl JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Reurl API returned success=false")
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Reurl no data")
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	res, _ := data["result"].(map[string]interface{})
-	if res == nil {
-		log.Printf("Reurl no result")
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := res["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Reurl no short_url")
-		h.sendMsg(chatID, localization.Get("reurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("reurlSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_reurl")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchTinycc(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/tinycc?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Tinycc API error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Tinycc read error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Tinycc JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Tinycc API returned success=false")
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Tinycc no data")
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := data["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Tinycc no short_url")
-		h.sendMsg(chatID, localization.Get("tinyccError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("tinyccSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_tinycc")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchItsssl(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/itsssl?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Itsssl API error: %v", err)
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Itsssl read error: %v", err)
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Itsssl JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Itsssl API returned success=false")
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Itsssl no data")
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := data["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Itsssl no short_url")
-		h.sendMsg(chatID, localization.Get("itssslError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("itssslSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_itsssl")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchCuqin(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/cuqin?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Cuqin API error: %v", err)
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Cuqin read error: %v", err)
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Cuqin JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Cuqin API returned success=false")
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Cuqin no data")
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := data["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Cuqin no short_url")
-		h.sendMsg(chatID, localization.Get("cuqinError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("cuqinSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_cuqin")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchVurl(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/vurl?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Vurl API error: %v", err)
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Vurl read error: %v", err)
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Vurl JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Vurl API returned success=false")
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Vurl no data")
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := data["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Vurl no short_url")
-		h.sendMsg(chatID, localization.Get("vurlError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("vurlSuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_vurl")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchTiny(chatID int64, longURL, lang string) {
 	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/shortener/tiny?apiKey=%s&url=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(longURL))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Tiny API error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Tiny read error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Tiny JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Tiny API returned success=false")
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Tiny no data")
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-
-	shortURL, _ := data["short_url"].(string)
-	if shortURL == "" {
-		log.Printf("Tiny no short_url")
-		h.sendMsg(chatID, localization.Get("tinyError", lang), keyboards.Back(lang))
-		return
-	}
-
-	h.sendMsg(chatID, localization.Get("tinySuccess", lang, shortURL), keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("short_tiny")
+	h.runShortener(s, chatID, chatID, longURL, lang)
 }
 
 func (h *Handler) fetchGoogleNews(chatID int64, query, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/google?apiKey=%s&query=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey(), url.QueryEscape(query))
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	articles, _ := data["articles"].([]interface{})
-	if len(articles) == 0 {
-		log.Printf("News no articles")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(articles) < count {
-		count = len(articles)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := articles[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		articleURL, _ := article["url"].(string)
-		source, _ := article["source"].(string)
-		published, _ := article["published_at"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_google")
+	h.runSearcher(s, chatID, chatID, query, 0, lang)
 }
 
 func (h *Handler) fetchBbcNews(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/bbc?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("BBC News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("BBC News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("BBC News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("BBC News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("BBC News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	articles, _ := data["articles"].([]interface{})
-	if len(articles) == 0 {
-		log.Printf("BBC News no articles")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(articles) < count {
-		count = len(articles)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := articles[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		desc, _ := article["description"].(string)
-		articleURL, _ := article["url"].(string)
-		source, _ := article["source"].(string)
-		published, _ := article["published_at"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
-		if desc != "" {
-			msg += fmt.Sprintf("   _%s_\n", escapeMarkdown(truncate(desc, 100)))
-		}
-		msg += "\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_bbc")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchCnnNews(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/cnn?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("CNN News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("CNN News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("CNN News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("CNN News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("CNN News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	articles, _ := data["articles"].([]interface{})
-	if len(articles) == 0 {
-		log.Printf("CNN News no articles")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(articles) < count {
-		count = len(articles)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := articles[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		desc, _ := article["description"].(string)
-		articleURL, _ := article["url"].(string)
-		source, _ := article["source"].(string)
-		published, _ := article["published_at"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n   %s — %s\n", i+1, escapeMarkdown(title), articleURL, escapeMarkdown(source), escapeMarkdown(published))
-		if desc != "" {
-			msg += fmt.Sprintf("   _%s_\n", escapeMarkdown(truncate(desc, 100)))
-		}
-		msg += "\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_cnn")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchAljazeeraNews(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/aljazeera?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Al Jazeera News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Al Jazeera News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Al Jazeera News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Al Jazeera News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Al Jazeera News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	articles, _ := data["articles"].([]interface{})
-	if len(articles) == 0 {
-		log.Printf("Al Jazeera News no articles")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(articles) < count {
-		count = len(articles)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := articles[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		articleURL, _ := article["url"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_aljazeera")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchCgtnNews(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/cgtnWorld?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("CGTN News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("CGTN News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("CGTN News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("CGTN News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("CGTN News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	headlines, _ := data["headlines"].([]interface{})
-	if len(headlines) == 0 {
-		log.Printf("CGTN News no headlines")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(headlines) < count {
-		count = len(headlines)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := headlines[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		articleURL, _ := article["url"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_cgtn")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchTrtNews(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/news/trtWorld?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("TRT News API error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("TRT News read error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("TRT News JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("TRT News API returned success=false")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("TRT News no data")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	headlines, _ := data["headlines"].([]interface{})
-	if len(headlines) == 0 {
-		log.Printf("TRT News no headlines")
-		h.sendMsg(chatID, localization.Get("newsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	count := 10
-	if len(headlines) < count {
-		count = len(headlines)
-	}
-
-	msg := localization.Get("newsResult", lang, count)
-	for i := 0; i < count; i++ {
-		article, _ := headlines[i].(map[string]interface{})
-		if article == nil {
-			continue
-		}
-		title, _ := article["title"].(string)
-		articleURL, _ := article["url"].(string)
-		msg += fmt.Sprintf("%d. [%s](%s)\n\n", i+1, escapeMarkdown(title), articleURL)
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("news_trt")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchCricket(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/sports/cricket?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Cricket API error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Cricket read error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Cricket JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Cricket API returned success=false")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Cricket no data")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	games, _ := data["games"].([]interface{})
-	if len(games) == 0 {
-		log.Printf("Cricket no games")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	msg := localization.Get("sportsResult", lang)
-	for _, g := range games {
-		game, _ := g.(map[string]interface{})
-		if game == nil {
-			continue
-		}
-		name, _ := game["name"].(string)
-		status, _ := game["status"].(string)
-		details, _ := game["details"].(string)
-		msg += fmt.Sprintf("▫️ *%s*\n   %s", escapeMarkdown(name), escapeMarkdown(status))
-		if details != "" {
-			msg += fmt.Sprintf("\n   `%s`", details)
-		}
-		msg += "\n\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("sports_cricket")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchNfl(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/sports/nfl?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("NFL API error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("NFL read error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("NFL JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("NFL API returned success=false")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("NFL no data")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	games, _ := data["games"].([]interface{})
-	if len(games) == 0 {
-		log.Printf("NFL no games")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	msg := localization.Get("sportsResult", lang)
-	for _, g := range games {
-		game, _ := g.(map[string]interface{})
-		if game == nil {
-			continue
-		}
-		name, _ := game["name"].(string)
-		status, _ := game["status"].(string)
-		date, _ := game["date"].(string)
-		home, _ := game["home_team"].(map[string]interface{})
-		away, _ := game["away_team"].(map[string]interface{})
-
-		homeName, _ := home["name"].(string)
-		homeScore, _ := home["score"].(string)
-		homeRecord, _ := home["record"].(string)
-		awayName, _ := away["name"].(string)
-		awayScore, _ := away["score"].(string)
-		awayRecord, _ := away["record"].(string)
-
-		msg += fmt.Sprintf("▫️ *%s*\n   %s\n", escapeMarkdown(name), escapeMarkdown(status))
-		msg += fmt.Sprintf("   🏠 %s %s (%s)\n", escapeMarkdown(homeName), homeScore, escapeMarkdown(homeRecord))
-		msg += fmt.Sprintf("   🛩 %s %s (%s)\n", escapeMarkdown(awayName), awayScore, escapeMarkdown(awayRecord))
-		if date != "" {
-			msg += fmt.Sprintf("   🕐 %s\n", escapeMarkdown(date))
-		}
-		msg += "\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("sports_nfl")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchNba(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/sports/nba?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("NBA API error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("NBA read error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("NBA JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("NBA API returned success=false")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("NBA no data")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	games, _ := data["games"].([]interface{})
-	if len(games) == 0 {
-		log.Printf("NBA no games")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	msg := localization.Get("sportsResult", lang)
-	for _, g := range games {
-		game, _ := g.(map[string]interface{})
-		if game == nil {
-			continue
-		}
-		name, _ := game["name"].(string)
-		status, _ := game["status"].(string)
-		date, _ := game["date"].(string)
-		home, _ := game["home_team"].(map[string]interface{})
-		away, _ := game["away_team"].(map[string]interface{})
-
-		homeName, _ := home["name"].(string)
-		homeScore, _ := home["score"].(string)
-		awayName, _ := away["name"].(string)
-		awayScore, _ := away["score"].(string)
-
-		msg += fmt.Sprintf("▫️ *%s*\n   %s\n", escapeMarkdown(name), escapeMarkdown(status))
-		msg += fmt.Sprintf("   🏠 %s %s\n", escapeMarkdown(homeName), homeScore)
-		msg += fmt.Sprintf("   🛩 %s %s\n", escapeMarkdown(awayName), awayScore)
-		if date != "" {
-			msg += fmt.Sprintf("   🕐 %s\n", escapeMarkdown(date))
-		}
-		msg += "\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("sports_nba")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) fetchCricbuzz(chatID int64, lang string) {
-	defer h.recoverPanic()
-	apiURL := fmt.Sprintf("%s/sports/cricbuzz?apiKey=%s",
-		h.cfg.EffectiveApiBaseURL(), h.cfg.EffectiveApiKey())
-
-	resp, err := mediaClient.Get(apiURL)
-	if err != nil {
-		log.Printf("Cricbuzz API error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-	defer resp.Body.Close()
-
-	body, err := readBody(resp, maxAPISize)
-	if err != nil {
-		log.Printf("Cricbuzz read error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("Cricbuzz JSON error: %v", err)
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	success, _ := result["success"].(bool)
-	if !success {
-		log.Printf("Cricbuzz API returned success=false")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	data, _ := result["data"].(map[string]interface{})
-	if data == nil {
-		log.Printf("Cricbuzz no data")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	games, _ := data["games"].([]interface{})
-	if len(games) == 0 {
-		log.Printf("Cricbuzz no games")
-		h.sendMsg(chatID, localization.Get("sportsError", lang), keyboards.Back(lang))
-		return
-	}
-
-	msg := localization.Get("sportsResult", lang)
-	for _, g := range games {
-		game, _ := g.(map[string]interface{})
-		if game == nil {
-			continue
-		}
-		title, _ := game["title"].(string)
-		matchInfo, _ := game["match_info"].(string)
-		status, _ := game["status"].(string)
-		gameURL, _ := game["url"].(string)
-		team1, _ := game["team1"].(map[string]interface{})
-		team2, _ := game["team2"].(map[string]interface{})
-
-		t1Name, _ := team1["name"].(string)
-		t1Score, _ := team1["score"].(string)
-		t2Name, _ := team2["name"].(string)
-		t2Score, _ := team2["score"].(string)
-
-		msg += fmt.Sprintf("▫️ *%s*\n", escapeMarkdown(title))
-		msg += fmt.Sprintf("   🏏 %s — %s\n", escapeMarkdown(t1Name), t1Score)
-		msg += fmt.Sprintf("   🏏 %s — %s\n", escapeMarkdown(t2Name), t2Score)
-		msg += fmt.Sprintf("   📍 %s\n", escapeMarkdown(matchInfo))
-		msg += fmt.Sprintf("   ℹ️ %s\n", escapeMarkdown(status))
-		msg += fmt.Sprintf("   [🔗 Cricbuzz](%s)\n", gameURL)
-		msg += "\n"
-	}
-
-	h.sendMsg(chatID, msg, keyboards.MainMenu(h.cfg, lang))
+	s, _ := searcherByID("sports_cricbuzz")
+	h.runSearcher(s, chatID, chatID, "", 0, lang)
 }
 
 func (h *Handler) processImageEffect(chatID int64, uid int64, photos []tgbotapi.PhotoSize, lang string) {

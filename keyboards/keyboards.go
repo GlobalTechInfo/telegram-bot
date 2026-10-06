@@ -570,27 +570,53 @@ func MoreMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
 
 // ToolsMenu collects the utility features behind one button.
 func ToolsMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
+	rows := [][]tgbotapi.InlineKeyboardButton{
+		{
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("qrMenu", lang), "tools_qr"),
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("weatherMenu", lang), "tools_weather"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("translateMenu", lang), "tools_translate"),
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("convertMenu", lang), "tools_convert"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("shortUrl", lang), "shorturl"),
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("remindMenu", lang), "tools_remind"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("historyMenu", lang), "tools_history"),
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("redditMenu", lang), "tools_reddit"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
-		),
-	)
+		},
+	}
+	// Appended only when each integration is configured, so the menu never offers
+	// a command that would answer "unknown command".
+	rows = append(rows, optionalToolsRows(cfg, lang)...)
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+	))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// optionalToolsRows returns the define and media buttons when they are available.
+func optionalToolsRows(cfg *config.Config, lang string) [][]tgbotapi.InlineKeyboardButton {
+	var buttons []tgbotapi.InlineKeyboardButton
+	if cfg.Tools.Define.Enabled && cfg.Tools.Define.Endpoint != "" {
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
+			localization.Get("defineMenu", lang), "define"))
+	}
+	// Media is offered whenever the command is enabled, not when ffmpeg is
+	// present. Rotate, flip, square and resize need no external binary, so
+	// gating this on ffmpegPath hid a working feature from the menu on any host
+	// without it. The video-only buttons are gated separately, inside
+	// MediaOpsMenu, where the kind of media is known.
+	if cfg.Tools.Media.Enabled || cfg.Tools.Media.FFmpegPath != "" {
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
+			localization.Get("mediaMenu", lang), "media"))
+	}
+	if len(buttons) == 0 {
+		return nil
+	}
+	return [][]tgbotapi.InlineKeyboardButton{buttons}
 }
 
 // GroupMenu collects the group/channel admin commands.
@@ -617,4 +643,54 @@ func GroupMenu(cfg *config.Config, lang string) tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
 		),
 	)
+}
+
+// MediaOpsMenu lists the edits available for the kind of media just received.
+// The ffmpeg-backed operations are left out entirely when ffmpeg is missing,
+// rather than shown and then failing.
+func MediaOpsMenu(lang, kind string, ffmpeg bool) tgbotapi.InlineKeyboardMarkup {
+	type op struct {
+		key  string
+		text string
+	}
+	var ops []op
+	if kind == "video" {
+		// Trim is ffmpeg-backed like the rest, so it goes away with it. Leaving it
+		// visible on a host without ffmpeg would offer a button that always fails.
+		if ffmpeg {
+			ops = append(ops,
+				op{"trim", localization.Get("mediaTrim", lang)},
+				op{"audio", localization.Get("mediaAudio", lang)},
+				op{"voice", localization.Get("mediaVoice", lang)},
+				op{"gif", localization.Get("mediaGif", lang)})
+		}
+	} else {
+		ops = append(ops,
+			op{"rotate90", localization.Get("mediaRotL", lang)},
+			op{"rotate180", localization.Get("mediaRot180", lang)},
+			op{"rotate270", localization.Get("mediaRotR", lang)},
+			op{"flip", localization.Get("mediaFlip", lang)},
+			op{"square", localization.Get("mediaSquare", lang)},
+			op{"resize", localization.Get("mediaResize", lang)})
+	}
+
+	const perRow = 2
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := 0; i < len(ops); i += perRow {
+		end := i + perRow
+		if end > len(ops) {
+			end = len(ops)
+		}
+		var row []tgbotapi.InlineKeyboardButton
+		for _, o := range ops[i:end] {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(o.text, "media:"+o.key))
+		}
+		rows = append(rows, row)
+	}
+	// backToMenu, like every other menu here. This one asked for a "back" key that
+	// is not defined in any language, so the button rendered with an empty label.
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(localization.Get("backToMenu", lang), "back"),
+	))
+	return tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
