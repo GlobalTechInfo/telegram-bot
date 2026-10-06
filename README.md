@@ -35,16 +35,37 @@ help desk.
 - **Private chats**: answers every message, on by default.
 - **Groups**: quiet unless you reply to it or @mention it, off by default.
 - `/ai on`, `/ai off`, `/ai status` — or the Kraken row in **Settings**, per chat.
+- `/ai forget` — clear what it remembers about this chat.
+- **Remembers the conversation.** Earlier turns in the same chat are replayed to
+  the agent, so "what did I just ask?" works. Keep it short and it stays fast.
 - Replies carry no bot prefix and no buttons, so it reads like a person typing.
 
-```bash
-AI_BASE_URL=https://mistral.stacktoy.workers.dev
-AI_KEY=your-key-here
+The agent endpoint is a Cloudflare Worker, configured in `config.json`:
+
+```json
+"ai": {
+  "enabled": true,
+  "name": "Kraken",
+  "owner": "Qasim",
+  "apiBaseUrl": "...",
+  "apiKey": "...",
+  "maxInputChars": 2000,
+  "cooldownSeconds": 3
+}
 ```
 
-The key is read from the environment only; `config.json` ships with an empty
-`ai.apiKey` so no secret is committed. Without `AI_KEY` the agent stays silent
-and everything else keeps working.
+Every key and base URL lives in `config.json` — read the values from there. This
+README deliberately does not repeat them.
+
+`AI_BASE_URL` and `AI_KEY` override `config.json` when set, so a deployment can
+keep its key in `.env` instead. Without either the agent stays silent and
+everything else keeps working.
+
+**The contract matters.** The endpoint is called as
+`GET <base>/?apikey=KEY&lang=LANG&text=TEXT` and answers at
+`data.choices[0].message.content`. The language travels twice on purpose: as
+`lang` for the Worker to build its system prompt, and as a line inside `text`,
+so the bot still gets the right language from an endpoint that ignores `lang`.
 
 Run `/ai status` in Telegram to confirm the endpoint is reachable; it reports
 which setting is missing when it is not.
@@ -97,6 +118,10 @@ they apply to ordinary chat traffic rather than admin actions.
 - **Weather** — current conditions by city (temperature, description, wind, humidity)
 - **Translate** — detects the source language, translates to a chosen target
 - **Unit Converter** — `5 kg to lb`, `100 usd to eur`
+- **Define** — `/define` looks a word up: phonetics, part of speech and examples.
+  The endpoint is configurable, so it can be pointed elsewhere or switched off.
+- **Media Editor** — `/media` then send a photo: rotate, flip, square-crop or
+  resize. All of it is pure Go, so it works with no external binary.
 - **Reminders** — `/remind 10m standup`, fires from a background ticker
 - **History** — your last 15 queries, per user
 - **Reddit** — fetch posts from a subreddit
@@ -104,6 +129,65 @@ they apply to ordinary chat traffic rather than admin actions.
 
 Reminder durations accept `s`, `m`, `h`, `d` in either `10m text` or `10 m text`
 form. Unreadable text is preserved; only the leading amount is parsed.
+
+**Video editing is optional.** Trim, extract audio, make a voice note and build a
+GIF shell out to ffmpeg. Install it and set `tools.media.ffmpegPath`, and those
+four buttons appear on video. Without it they are hidden rather than shown and
+then failing — and the photo buttons are unaffected either way.
+
+Trim asks for its window: send `12` for twelve seconds from the start, or
+`12-40` for a range.
+
+### 🎨 Inline Mode
+
+Enabled at startup by the bot itself, so there is nothing to do in BotFather
+beyond the inline placeholder. `@yourbot cat` returns images and videos; picking
+one drops the media into the chat directly, with no download and re-upload.
+
+Prefix the query to choose the source:
+
+| Query | Searches |
+|-------|----------|
+| `@bot cat` | Images, then YouTube |
+| `@bot yt lofi` | YouTube only |
+| `@bot img cats` | Images only |
+| `@bot news gaza` | Google News |
+| `@bot sticker dogs` | Stickers |
+| `@bot` (empty) | Help articles |
+
+Sticker results are sent as real stickers, not photos, so they can be long-pressed
+and added to a collection. Telegram does not let a bot own a sticker pack — a set
+belongs to a person and the API answers `USER_IS_BOT` — so results go straight to
+the chat.
+
+### 🔗 Deep Links
+
+`/start` honours its payload, so a link can open a specific destination.
+Unrecognised payloads fall through to the normal welcome, so old links still work.
+
+```
+https://t.me/YourBot?start=dl|yt|https://youtu.be/VIDEO_ID
+https://t.me/YourBot?start=search|news|gaza
+https://t.me/YourBot?start=chat|define
+```
+
+### 🗞 Channel Digest
+
+Posts the news feed to a channel on a timer, reusing the searcher registry.
+
+```json
+"digest": {
+  "enabled": false,
+  "channelId": 0,
+  "everyHours": 6,
+  "source": "google"
+}
+```
+
+Set `channelId` and `enabled` to turn it on. `everyHours` has a 15-minute floor so
+a typo cannot post every minute, and the source must be a news feed — a media
+source is refused rather than dumping images into the channel. Off by default:
+posting to the wrong channel is not something to discover at runtime.
 
 ### 🔍 Search Engines
 - **Pinterest Search** — search and download images
@@ -131,6 +215,7 @@ form. Unreadable text is preserved; only the leading amount is parsed.
 
 ### ⚙️ General
 - **Auto URL Detection** — paste any supported link, bot auto-starts the download
+- **Batch Downloads** — paste several links in one message and they all download
 - **Multi-Language** — 13 languages (en, es, fr, de, hi, ur, sw, ha, yo, zu, am, af, ig), every string translated in all 13
 - **Inline Keyboard Menus** — 11-button main menu, six submenus, back navigation
 - **Forwarded Media** — re-download and repost media from a forwarded message
@@ -139,7 +224,7 @@ form. Unreadable text is preserved; only the leading amount is parsed.
 - **User Tracking** — first seen, last seen, name/username tracking
 - **Admin Panel** — total users and feedback count, with a feedback viewer
 - **Update Audit Log** — every command, callback and message is logged with chat, user and action
-- **Inline Mode** — `@botusername help` and `@botusername about`
+- **Deep Links** — `/start` payloads open a downloader, search or feature directly
 - **Concurrent Downloads** — semaphore-limited (max 2), 100MB cap
 - **Configurable API** — base URL and API key via `config.json` or `.env`
 - **Timezone-aware** — configurable timezone for timestamps
@@ -173,10 +258,12 @@ Edit `.env` with your bot token and settings:
 ```ini
 BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ADMIN_IDS=123456789,987654321
-API_BASE_URL=https://api.qasimdev.dpdns.org/api
-API_KEY=qasim-dev
 DB_PATH=/bot/data/bot.db
 ```
+
+Only `BOT_TOKEN` is required. The API base URL, API key and agent key already
+live in `config.json`; set `API_BASE_URL` / `API_KEY` / `AI_BASE_URL` /
+`AI_KEY` here only if you want the environment to win.
 
 #### Environment Variables
 
@@ -191,14 +278,16 @@ DB_PATH=/bot/data/bot.db
 | `MEM_LIMIT_MB` | No | Go soft memory limit in MB (default: `400`) — lower it on a 512MB instance |
 | `GC_PERCENT` | No | `GOGC` target (default: `50`) — trades CPU for a smaller heap |
 | `AI_BASE_URL` | No | Overrides `ai.apiBaseUrl` in config.json |
-| `AI_KEY` | **Yes** for AI chat | Key for the AI agent endpoint — deliberately blank in config.json |
+| `AI_KEY` | No | Overrides `ai.apiKey` in config.json |
 
 Commands listed in `config.json` with `enabled: true` are published to Telegram's
 slash menu on startup, so they show up in the client without manual setup.
 
 #### config.json
 
-All bot settings live in `config.json`: bot info, owner, timezone, commands, UI buttons, API config, localization, and features. See the file directly for the full schema.
+All bot settings live in `config.json`: bot info, owner, timezone, commands, UI buttons, API config, localization, and `tools`. See the file directly for the full schema.
+
+Anything under `.env` wins over `config.json`.
 
 Key fields:
 
@@ -216,6 +305,12 @@ Key fields:
 | `apiBaseUrl` | Third-party API base URL |
 | `apiKey` | Third-party API key |
 | `ui.prefix` | Prefix shown on every message |
+| `tools.define` | Dictionary lookup: `enabled` and the `endpoint` to query |
+| `tools.media` | `enabled`, plus `ffmpegPath` for the video operations |
+| `tools.inline` | `enabled` — the bot calls `setInlineMode` on startup |
+| `tools.sticker` | `enabled` — sticker search returns real stickers |
+| `tools.digest` | `enabled`, `channelId`, `everyHours`, `source` |
+| `ai` | `enabled`, `name`, `owner`, `apiBaseUrl`, `apiKey`, `maxInputChars`, `cooldownSeconds` |
 | `ui.mainMenu.buttons` | Main menu button definitions |
 | `localization.defaultLanguage` | Fallback language |
 | `localization.supportedLanguages` | Available languages |
@@ -359,6 +454,8 @@ Port comes from `$PORT`, defaulting to `8080`.
 | `/weather` | Public | Current weather for a city |
 | `/translate` | Public | Translate text to another language |
 | `/convert` | Public | Convert units (`5 kg to lb`) |
+| `/define` | Public | Look up the meaning of a word |
+| `/media` | Public | Rotate, flip, square-crop or resize a photo |
 | `/meme` | Public | Generate a meme from a template |
 | `/reddit` | Public | Fetch posts from a subreddit |
 | `/remind` | Public | Set a reminder; bare `/remind` lists yours |
@@ -388,12 +485,20 @@ Port comes from `$PORT`, defaulting to `8080`.
 ```
 main.go                  Entry point — loads config/env, connects to Telegram, event loop
 ├── config/config.go     Configuration loading, IsAdmin(), URL/key helpers
-├── handlers/handlers.go Command/callback/message dispatch, download/search/effect logic
+├── handlers/handlers.go Command/callback/message dispatch, download/effect logic
+├── handlers/downloads.go Downloader registry + delivery engine (15 sites)
+├── handlers/search.go   Searcher registry (21 sources) + rendering
+├── handlers/inline.go   Inline query answering
+├── handlers/media.go    Photo editing, ffmpeg video ops, sticker sending
+├── handlers/define.go   Dictionary lookup and translation
+├── handlers/deeplink.go /start payload routing
+├── handlers/digest.go   Scheduled channel digests
+├── handlers/ai.go       Kraken: request, memory, cleanup
 ├── handlers/admin.go    Group & channel administration, reminders, tool API calls
-├── keyboards/keyboards.go Inline keyboard markup builders (main menu + 6 submenus)
+├── keyboards/keyboards.go Inline keyboard markup builders (main menu + submenus)
 ├── localization/localization.go i18n — 13 languages, every key in every language
 ├── session/session.go   BoltDB persistence (users, sessions, feedback, groups, reminders, queries)
-├── config.json          Bot configuration (commands, UI, features, localization, API)
+├── config.json          Bot configuration (commands, UI, tools, localization, API)
 ├── .env                 Secrets (BOT_TOKEN, ADMIN_IDS, API config, DB_PATH)
 └── .env.example         Template for .env
 ```

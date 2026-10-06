@@ -76,7 +76,7 @@
     },
     "ai": {
       "enabled": true,
-      "description": "Chat with Kraken, the AI agent"
+      "description": "Talk to Kraken (on, off, status, forget)"
     },
     "capcut": {
       "enabled": true,
@@ -249,41 +249,40 @@
     "post": {
       "enabled": true,
       "description": "Post a message to the group or channel"
+    },
+    "define": {
+      "enabled": true,
+      "description": "Look up the meaning of a word"
+    },
+    "media": {
+      "enabled": true,
+      "description": "Trim, rotate or resize a photo or video"
     }
   },
   "adminIds": [],
-  "features": {
-    "inlineMode": true,
-    "userTracking": true,
-    "feedbackSystem": true,
-    "polls": true,
-    "qr": "Generate QR code from text or URL",
-    "weather": "Current weather by city",
-    "translate": "Translate text to another language",
-    "convert": "Convert units",
-    "meme": "Generate memes from templates",
-    "reddit": "Fetch posts from a subreddit",
-    "remind": "Set a reminder",
-    "history": "Show your recent queries",
-    "ban": "Ban a user in the group",
-    "kick": "Kick a user from the group",
-    "mute": "Mute a user in the group",
-    "unban": "Unban a user in the group",
-    "promote": "Promote a user to admin",
-    "demote": "Remove admin from a user",
-    "del": "Delete messages (reply or 1-100)",
-    "invite": "Create a group invite link",
-    "welcome": "Set the new-member welcome message",
-    "groups": "List known groups",
-    "channels": "List known channels",
-    "ginfo": "Change group name or description",
-    "gsettings": "Toggle welcome, lockdown, antilinks, anticaps",
-    "gstats": "Group message and member stats",
-    "chsettings": "Channel settings",
-    "chstats": "Channel stats",
-    "stream": "Store a live stream link for the chat",
-    "moderate": "Moderation switches for the group",
-    "post": "Post a message to the group or channel"
+  "tools": {
+    "define": {
+      "enabled": true,
+      "endpoint": "https://api.dictionaryapi.dev/api/v2/entries/en/",
+      "description": "Look up the meaning of a word"
+    },
+    "media": {
+      "ffmpegPath": "",
+      "description": "Trim, rotate and resize media",
+      "enabled": true
+    },
+    "inline": {
+      "enabled": true
+    },
+    "digest": {
+      "enabled": false,
+      "channelId": 0,
+      "everyHours": 6,
+      "source": "google"
+    },
+    "sticker": {
+      "enabled": true
+    }
   },
   "localization": {
     "defaultLanguage": "en",
@@ -310,7 +309,7 @@
     "name": "Kraken",
     "owner": "Qasim",
     "apiBaseUrl": "https://mistral.stacktoy.workers.dev",
-    "apiKey": "",
+    "apiKey": "Suhail",
     "maxInputChars": 2000,
     "cooldownSeconds": 3
   },

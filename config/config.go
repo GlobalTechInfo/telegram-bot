@@ -55,11 +55,41 @@ type Localization struct {
 	SupportedLanguages []string `json:"supportedLanguages"`
 }
 
-type Features struct {
-	InlineMode     bool `json:"inlineMode"`
-	UserTracking   bool `json:"userTracking"`
-	FeedbackSystem bool `json:"feedbackSystem"`
-	Polls          bool `json:"polls"`
+// Tools holds the optional integrations that are not part of the media API.
+//
+// It replaces a `features` map whose four booleans were never read by any code
+// and whose ~27 description strings were not even represented in the struct, so
+// config.json described features nobody could switch on or off.
+type Tools struct {
+	Define struct {
+		Enabled  bool   `json:"enabled"`
+		Endpoint string `json:"endpoint"`
+	} `json:"define"`
+	Media struct {
+		Enabled bool `json:"enabled"`
+		// FFmpegPath is optional. Rotate, flip, square and resize are pure Go and
+		// work with it empty; only trim, audio, voice and GIF need the binary.
+		FFmpegPath string `json:"ffmpegPath"`
+	} `json:"media"`
+	// Sticker toggles sticker search. There is deliberately no pack name or
+	// title: Telegram answers USER_IS_BOT if a bot tries to own a sticker set,
+	// since a set is owned by a person. Sticker results are sent to the chat
+	// directly instead.
+	Sticker struct {
+		Enabled bool `json:"enabled"`
+	} `json:"sticker"`
+	Inline struct {
+		// Inline needs the bot's inline mode enabled in BotFather before it will
+		// ever receive a query, so the bot sets it explicitly at startup instead
+		// of relying on a manual step that is easy to forget.
+		Enabled bool `json:"enabled"`
+	} `json:"inline"`
+	Digest struct {
+		Enabled    bool   `json:"enabled"`
+		ChannelID  int64  `json:"channelId"`
+		EveryHours int    `json:"everyHours"`
+		Source     string `json:"source"`
+	} `json:"digest"`
 }
 
 type BotConfig struct {
@@ -93,7 +123,7 @@ type Config struct {
 	Timezone     string                   `json:"timezone"`
 	Commands     map[string]CommandConfig `json:"commands"`
 	AdminIDs     []int64                  `json:"adminIds"`
-	Features     Features                 `json:"features"`
+	Tools        Tools                    `json:"tools"`
 	Localization Localization             `json:"localization"`
 	UI           UI                       `json:"ui"`
 	ApiBaseURL   string                   `json:"apiBaseUrl"`

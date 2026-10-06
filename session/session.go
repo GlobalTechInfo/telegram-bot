@@ -50,8 +50,11 @@ type QueryLog struct {
 }
 
 type GroupConfig struct {
-	ChatID     int64  `json:"chatId"`
-	Title      string `json:"title"`
+	ChatID int64  `json:"chatId"`
+	Title  string `json:"title"`
+	// IsChannel separates a broadcast channel from a group. Both live in the same
+	// bucket, so without this /channels listed the groups again.
+	IsChannel  bool   `json:"isChannel,omitempty"`
 	Welcome    string `json:"welcome"`
 	WelcomeOn  bool   `json:"welcomeOn"`
 	Lockdown   bool   `json:"lockdown"`
@@ -155,7 +158,7 @@ func NewStore(dbPath string) *Store {
 	}
 
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries"} {
+		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries", "stickers"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -257,6 +260,20 @@ func (s *Store) SetSessionData(userID int64, data map[string]interface{}) {
 	if err := s.saveSession(userID, sess); err != nil {
 		log.Printf("session save error: %v", err)
 	}
+}
+
+// SetSessionKeys merges keys into the session's data instead of replacing the
+// whole map. The media trim window has to be written alongside the file id that
+// applyMediaOp still needs, and a blanket SetSessionData would drop it.
+func (s *Store) SetSessionKeys(userID int64, keys map[string]interface{}) error {
+	sess := s.GetOrCreate(userID)
+	if sess.Data == nil {
+		sess.Data = make(map[string]interface{})
+	}
+	for k, v := range keys {
+		sess.Data[k] = v
+	}
+	return s.saveSession(userID, sess)
 }
 
 // ClearSessionData drops transient payloads (API blobs, cached URLs) that would
@@ -388,6 +405,25 @@ func (s *Store) ListGroups() []*GroupConfig {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var g GroupConfig
 			if err := json.Unmarshal(v, &g); err == nil {
+				if g.IsChannel {
+					continue
+				}
+				out = append(out, &g)
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+// ListChannels returns only the broadcast channels the bot has seen a post in.
+func (s *Store) ListChannels() []*GroupConfig {
+	var out []*GroupConfig
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("groups")).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var g GroupConfig
+			if err := json.Unmarshal(v, &g); err == nil && g.IsChannel {
 				out = append(out, &g)
 			}
 		}
@@ -574,3 +610,10 @@ func (s *Store) Cleanup() {
 func itob(v int64) []byte {
 	return []byte(fmt.Sprintf("%020d", v))
 }
+
+// Sticker pack bookkeeping.
+//
+// The pack itself lives at Telegram, but the bot has to know whether it already
+// exists: createNewStickerSet fails if it does and addStickerToSet fails if it
+// does not, so the first sticker of a pack decides which call to make. That has to
+// survive a restart, or every new pack fails on its second sticker.
