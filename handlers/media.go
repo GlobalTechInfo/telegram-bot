@@ -159,6 +159,15 @@ func flipImage(img image.Image) image.Image {
 // fitSide is the target length of the shorter edge.
 const fitSide = 512
 
+// gifMaxSeconds and gifFps bound the GIF conversion, the only operation that
+// holds every frame in memory at once. An unbounded clip from a 100MB download
+// is enough to outgrow a small container, and Go's soft memory limit does not
+// cover a subprocess.
+const (
+	gifMaxSeconds = 15
+	gifFps        = 12
+)
+
 // ffmpegTimeout caps one encode. A long video is the reason it exists, not a
 // corrupt file: without it a stuck decoder holds a download slot until the
 // process is killed.
@@ -555,7 +564,7 @@ func runFFmpeg(bin string, body []byte, op, from, to string) ([]byte, string, er
 		return nil, "", err
 	}
 
-	args := []string{"-hide_banner", "-loglevel", "error", "-y"}
+	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2"}
 	if op == "trim" {
 		if from != "" {
 			args = append(args, "-ss", from)
@@ -574,8 +583,14 @@ func runFFmpeg(bin string, body []byte, op, from, to string) ([]byte, string, er
 			args = append(args, "-vn", "-ac", "1", "-ar", "48000",
 				"-c:a", "libopus", "-b:a", "32k", outPath)
 		case "gif":
+			// Bounded on purpose. Every frame at 480px is held in memory at once,
+			// so an unbounded clip is the one operation here that can outgrow the
+			// host. Fifteen seconds keeps it small, and two threads stops ffmpeg
+			// spawning a stack per core on a small container.
 			args = append(args,
-				"-vf", "fps=12,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse",
+				"-t", strconv.Itoa(gifMaxSeconds),
+				"-vf", "fps="+strconv.Itoa(gifFps)+
+					",scale=480:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse",
 				outPath)
 		default:
 			return nil, "", fmt.Errorf("unknown video operation %q", op)

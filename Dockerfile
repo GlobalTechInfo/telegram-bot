@@ -14,8 +14,18 @@ RUN go build -o telegram-bot -ldflags="-s -w" .
 
 FROM debian:bookworm-slim
 
-# wget is required by the compose healthcheck; debian-slim does not ship it
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata wget \
+# wget is required by the compose healthcheck; debian-slim does not ship it.
+#
+# ffmpeg backs the video operations in /media: trim, extract audio, make a voice
+# note and build a GIF. Debian's build includes libopus, which the voice note
+# needs — a hand-rolled static ffmpeg usually does not, and the encode fails at
+# runtime rather than at build time. Leave ffmpegPath empty in config.json and the
+# bot finds this on PATH by itself; set it to hide it deliberately.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tzdata \
+        wget \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /bot

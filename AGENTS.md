@@ -326,6 +326,23 @@ their own collection. Do not reintroduce pack creation.
 being 512 and neither over. `resizeImage` refuses to enlarge, which is right for a
 download and wrong here, so stickers go through `scaleTo`.
 
+## Video Editing Needs ffmpeg
+
+`resolveFFmpeg` tries the configured path, then `ffmpeg` on `PATH`, then the two
+usual absolute locations, and returns `""` when there is none. `MediaOpsMenu` and
+`mediaOpKind` both consult `ffmpegAvailable()`, so the video buttons are **hidden**
+rather than shown and then failing — including trim, which is ffmpeg-backed like
+the rest. The `/media` menu button itself is gated on `tools.media.enabled`, not on
+ffmpeg, because the six photo edits are pure Go.
+
+The Dockerfile installs Debian's ffmpeg. Its `libopus` support is what the voice
+note needs; a hand-rolled static build usually lacks it and fails at runtime, not
+at build time.
+
+`debug.SetMemoryLimit` does **not** cover ffmpeg, since it is a subprocess. The GIF
+conversion is the one operation that holds every frame at once, so it is capped at
+`gifMaxSeconds`/`gifFps` and every ffmpeg call passes `-threads 2`.
+
 ## Memory Tuning
 
 `main.go:tuneMemory` runs before anything else allocates:

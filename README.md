@@ -130,10 +130,17 @@ they apply to ordinary chat traffic rather than admin actions.
 Reminder durations accept `s`, `m`, `h`, `d` in either `10m text` or `10 m text`
 form. Unreadable text is preserved; only the leading amount is parsed.
 
-**Video editing is optional.** Trim, extract audio, make a voice note and build a
-GIF shell out to ffmpeg. Install it and set `tools.media.ffmpegPath`, and those
-four buttons appear on video. Without it they are hidden rather than shown and
-then failing — and the photo buttons are unaffected either way.
+**Video editing needs ffmpeg**, which is included in the Docker image. Trim,
+extract audio, make a voice note and build a GIF; those four buttons appear on
+video only when ffmpeg is present, and are hidden rather than shown and then
+failing. The photo buttons need no external binary and are unaffected either way.
+
+Running outside Docker? Install ffmpeg and leave `tools.media.ffmpegPath` empty —
+the bot finds it on `PATH`. Set the field only to point at a specific binary or to
+disable the feature deliberately.
+
+GIF output is capped at 15 seconds. Every frame is held in memory during the
+conversion, and it is the one operation here that can outgrow a small host.
 
 Trim asks for its window: send `12` for twelve seconds from the start, or
 `12-40` for a range.
@@ -275,7 +282,7 @@ live in `config.json`; set `API_BASE_URL` / `API_KEY` / `AI_BASE_URL` /
 | `API_KEY` | No | Overrides `apiKey` in config.json |
 | `DB_PATH` | No | BoltDB file path (default: `./bot.db`) |
 | `PORT` | No | Health-check port (default: `8080`) |
-| `MEM_LIMIT_MB` | No | Go soft memory limit in MB (default: `400`) — lower it on a 512MB instance |
+| `MEM_LIMIT_MB` | No | Go soft memory limit in MB (default: `400`) — lower it on a 512MB instance. Raise it if you use video editing, which shells out to ffmpeg and is not covered by this limit |
 | `GC_PERCENT` | No | `GOGC` target (default: `50`) — trades CPU for a smaller heap |
 | `AI_BASE_URL` | No | Overrides `ai.apiBaseUrl` in config.json |
 | `AI_KEY` | No | Overrides `ai.apiKey` in config.json |
