@@ -414,6 +414,29 @@ func dlPendingState(state string) (downloader, bool) {
 	return dlByID(strings.TrimSuffix(strings.TrimPrefix(state, "awaiting_"), "_url"))
 }
 
+// dlAutoHit resolves a pasted link for auto-detection only, keeping manualOnly
+// sites out of it.
+//
+// dlByHost deliberately matches every site, because it also validates the link a
+// user pasted in answer to /gh. Filtering manualOnly inside it therefore broke
+// that path as well, so the exclusion lives here, at the one caller that means
+// "start a download without being asked".
+func dlAutoHit(raw string) dlHit {
+	hit := dlByHost(raw)
+	if hit.d.manualOnly {
+		return dlHit{}
+	}
+	return hit
+}
+
+// dlAutoHost reports whether a pasted link belongs to an auto-detected site.
+func dlAutoHost(raw string) bool {
+	if !dlHasHost(raw) {
+		return false
+	}
+	return dlAutoHit(raw).d.id != ""
+}
+
 // dlHostOK checks that a pasted link really belongs to the site whose prompt the
 // user answered, so pasting a TikTok link at /yt reports an invalid link instead
 // of downloading the wrong thing.

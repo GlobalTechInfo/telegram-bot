@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -50,8 +51,11 @@ type QueryLog struct {
 }
 
 type GroupConfig struct {
-	ChatID     int64  `json:"chatId"`
-	Title      string `json:"title"`
+	ChatID int64  `json:"chatId"`
+	Title  string `json:"title"`
+	// IsChannel separates a broadcast channel from a group. Both live in the same
+	// bucket, so without this /channels listed the groups again.
+	IsChannel  bool   `json:"isChannel,omitempty"`
 	Welcome    string `json:"welcome"`
 	WelcomeOn  bool   `json:"welcomeOn"`
 	Lockdown   bool   `json:"lockdown"`
@@ -60,7 +64,40 @@ type GroupConfig struct {
 	MsgCount   int    `json:"msgCount"`
 	LastActive string `json:"lastActive"`
 	StreamURL  string `json:"streamUrl"`
-	WarnCount  int    `json:"warnCount"`
+	// WarnCount is keyed by user id, not held as a single number. One counter per
+	// chat meant all senders shared it: two people shouting and then a third
+	// shouting would mute that third person on a first offence, and anyone's
+	// ordinary message reset it for everyone, so a persistent shouter was never
+	// muted while the chat carried on around them.
+	WarnCount map[string]int `json:"warnCount,omitempty"`
+}
+
+// CapsWarnCount is how many shouted messages one user has made in this chat.
+func (g GroupConfig) CapsWarnCount(userID int64) int {
+	return g.WarnCount[strconv.FormatInt(userID, 10)]
+}
+
+// BumpCapsWarn raises one user's counter and returns the new value, dropping the
+// entry once it falls back to zero so the map does not grow forever.
+func (g *GroupConfig) BumpCapsWarn(userID int64) int {
+	if g.WarnCount == nil {
+		g.WarnCount = make(map[string]int)
+	}
+	k := strconv.FormatInt(userID, 10)
+	g.WarnCount[k]++
+	n := g.WarnCount[k]
+	if n <= 0 {
+		delete(g.WarnCount, k)
+	}
+	return n
+}
+
+// ClearCapsWarn resets one user's counter, leaving everyone else's alone.
+func (g *GroupConfig) ClearCapsWarn(userID int64) {
+	if g.WarnCount == nil {
+		return
+	}
+	delete(g.WarnCount, strconv.FormatInt(userID, 10))
 }
 
 type Store struct {
@@ -155,7 +192,7 @@ func NewStore(dbPath string) *Store {
 	}
 
 	err = db.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries"} {
+		for _, name := range []string{"users", "sessions", "feedbacks", "groups", "reminders", "queries", "ai_history"} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -257,6 +294,56 @@ func (s *Store) SetSessionData(userID int64, data map[string]interface{}) {
 	if err := s.saveSession(userID, sess); err != nil {
 		log.Printf("session save error: %v", err)
 	}
+}
+
+// AIHistory and ForgetAIHistory keep Kraken's memory out of sess.Data.
+//
+// It used to live there, and every command that starts a flow replaces that map
+// with an empty one — so opening /qr threw away the conversation without the
+// user asking. A dedicated bucket means clearing command state cannot touch it.
+//
+// The payload is opaque JSON: the turn type belongs to the handlers package.
+func (s *Store) AIHistory(chatID int64) []byte {
+	var out []byte
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		v := tx.Bucket([]byte("ai_history")).Get(itob(chatID))
+		out = append([]byte(nil), v...)
+		return nil
+	})
+	if err != nil {
+		log.Printf("ai history read: %v", err)
+	}
+	return out
+}
+
+func (s *Store) SetAIHistory(chatID int64, encoded []byte) {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("ai_history")).Put(itob(chatID), encoded)
+	}); err != nil {
+		log.Printf("ai history write: %v", err)
+	}
+}
+
+func (s *Store) ForgetAIHistory(chatID int64) {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte("ai_history")).Delete(itob(chatID))
+	}); err != nil {
+		log.Printf("ai history delete: %v", err)
+	}
+}
+
+// SetSessionKeys merges keys into the session's data instead of replacing the
+// whole map. The media trim window has to be written alongside the file id that
+// applyMediaOp still needs, and a blanket SetSessionData would drop it.
+func (s *Store) SetSessionKeys(userID int64, keys map[string]interface{}) error {
+	sess := s.GetOrCreate(userID)
+	if sess.Data == nil {
+		sess.Data = make(map[string]interface{})
+	}
+	for k, v := range keys {
+		sess.Data[k] = v
+	}
+	return s.saveSession(userID, sess)
 }
 
 // ClearSessionData drops transient payloads (API blobs, cached URLs) that would
@@ -388,6 +475,25 @@ func (s *Store) ListGroups() []*GroupConfig {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var g GroupConfig
 			if err := json.Unmarshal(v, &g); err == nil {
+				if g.IsChannel {
+					continue
+				}
+				out = append(out, &g)
+			}
+		}
+		return nil
+	})
+	return out
+}
+
+// ListChannels returns only the broadcast channels the bot has seen a post in.
+func (s *Store) ListChannels() []*GroupConfig {
+	var out []*GroupConfig
+	s.db.View(func(tx *bbolt.Tx) error {
+		c := tx.Bucket([]byte("groups")).Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var g GroupConfig
+			if err := json.Unmarshal(v, &g); err == nil && g.IsChannel {
 				out = append(out, &g)
 			}
 		}
@@ -574,3 +680,10 @@ func (s *Store) Cleanup() {
 func itob(v int64) []byte {
 	return []byte(fmt.Sprintf("%020d", v))
 }
+
+// Sticker pack bookkeeping.
+//
+// The pack itself lives at Telegram, but the bot has to know whether it already
+// exists: createNewStickerSet fails if it does and addStickerToSet fails if it
+// does not, so the first sticker of a pack decides which call to make. That has to
+// survive a restart, or every new pack fails on its second sticker.

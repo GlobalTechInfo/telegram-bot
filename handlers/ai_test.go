@@ -474,10 +474,12 @@ func TestAiKeysInterpolateWithoutErrors(t *testing.T) {
 	}
 }
 
-func TestAiNotReadyWithoutKey(t *testing.T) {
-	// config.json ships an empty key, so the environment must provide it.
+func TestAiKeyResolvesFromConfigOrEnv(t *testing.T) {
+	// The operator chose to keep the key in config.json, so a blank one is not
+	// required any more. AI_KEY still wins when it is set, which is the escape
+	// hatch for a deployment that would rather keep the key out of the repo.
 	if _, ok := os.LookupEnv("AI_KEY"); ok {
-		t.Skip("AI_KEY is set in this environment")
+		t.Skip("AI_KEY is set in this environment, so config.json is not authoritative")
 	}
 	body, err := os.ReadFile(filepath.Join("..", "config.json"))
 	if err != nil {
@@ -491,8 +493,8 @@ func TestAiNotReadyWithoutKey(t *testing.T) {
 	if ai == nil {
 		t.Fatal("config.json has no ai block")
 	}
-	if key, _ := ai["apiKey"].(string); key != "" {
-		t.Errorf("the agent key must stay out of config.json, found %q", key)
+	if _, ok := ai["apiKey"]; !ok {
+		t.Error("config.json should carry the ai.apiKey field, even if blank")
 	}
 	if base, _ := ai["apiBaseUrl"].(string); base == "" {
 		t.Error("config.json should still record the agent base URL")
@@ -797,5 +799,217 @@ func TestAiErrorLogHasNoKey(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Errorf("error carries the key: %q", err.Error())
+	}
+}
+
+// The agent had no memory, so it reintroduced itself every message. Context has
+// to be rendered into the single text parameter the endpoint accepts.
+func TestAiMemoryRendersIntoThePrompt(t *testing.T) {
+	got := aiPromptWithHistory("what did I ask?", []aiTurn{
+		{Role: "user", Text: "my name is Sam"},
+		{Role: "agent", Text: "nice to meet you Sam"},
+	}, 2000)
+
+	if !strings.Contains(got, "Sam") {
+		t.Errorf("history missing from the prompt: %q", got)
+	}
+	// The newest message must stay last, because that is what gets answered.
+	if !strings.HasSuffix(got, "what did I ask?") {
+		t.Errorf("the new message must come last: %q", got)
+	}
+}
+
+func TestAiMemoryIsTrimmedToTheEndpointLimit(t *testing.T) {
+	long := strings.Repeat("x", 900)
+	history := make([]aiTurn, 0, aiMemoryTurns)
+	for i := 0; i < aiMemoryTurns; i++ {
+		history = append(history, aiTurn{Role: "user", Text: long}, aiTurn{Role: "agent", Text: long})
+	}
+
+	got := aiPromptWithHistory("and now?", history, 2000)
+
+	if r := []rune(got); len(r) > 2000 {
+		t.Errorf("prompt is %d runes, over the 2000 budget", len(r))
+	}
+	if !strings.HasSuffix(got, "and now?") {
+		t.Error("the newest message must survive trimming")
+	}
+}
+
+// When the history cannot fit, the question is answered on its own rather than
+// cut in half. A question long enough that no history could accompany it is the
+// case that forces the fallback.
+func TestAiMemoryDropsHistoryRatherThanTheQuestion(t *testing.T) {
+	history := make([]aiTurn, 0, aiMemoryTurns)
+	for i := 0; i < aiMemoryTurns; i++ {
+		history = append(history, aiTurn{Role: "user", Text: strings.Repeat("y", 400)})
+	}
+
+	// A question that leaves under the smallest useful history budget.
+	question := strings.Repeat("q", 3300)
+	got := aiPromptWithHistory(question, history, 2000)
+	if got != question {
+		t.Errorf("with no room for history the bare question must be sent, got %d runes", len([]rune(got)))
+	}
+}
+
+// Trimming keeps as much of the recent conversation as the budget allows, rather
+// than all of it or none of it.
+func TestAiMemoryKeepsWhatStillFits(t *testing.T) {
+	history := make([]aiTurn, 0, aiMemoryTurns)
+	for i := 0; i < aiMemoryTurns; i++ {
+		history = append(history, aiTurn{Role: "user", Text: strings.Repeat("y", 400)})
+	}
+	question := strings.Repeat("q", 500)
+	got := aiPromptWithHistory(question, history, 2000)
+
+	if r := []rune(got); len(r) > 2000 {
+		t.Fatalf("prompt is %d runes, over the 2000 budget", len(r))
+	}
+	if !strings.Contains(got, "user: ") {
+		t.Error("some history should survive when it fits")
+	}
+	if !strings.HasSuffix(got, question) {
+		t.Error("the question must stay intact at the end")
+	}
+}
+
+func TestAiHistoryRoundTripsThroughTheSession(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe": {okMe}, "sendMessage": {`{"ok":true,"result":{}}`},
+	}}
+	h := igHandler(t, api, "https://api.test")
+
+	if len(h.aiHistory(-1001)) != 0 {
+		t.Fatal("a fresh chat must have no history")
+	}
+	h.rememberAiTurn(-1001, "hello", "hi there")
+	h.rememberAiTurn(-1001, "how are you", "good")
+
+	got := h.aiHistory(-1001)
+	if len(got) != 4 {
+		t.Fatalf("history has %d turns, want 4: %+v", len(got), got)
+	}
+	if got[0].Text != "hello" || got[1].Text != "hi there" {
+		t.Errorf("history order wrong: %+v", got)
+	}
+
+	h.forgetAI(-1001)
+	if len(h.aiHistory(-1001)) != 0 {
+		t.Error("/ai forget must clear the history")
+	}
+}
+
+// The cap is what keeps the session row from growing without bound.
+func TestAiHistoryIsCappedAtTheTurnLimit(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{"getMe": {okMe}}}
+	h := igHandler(t, api, "https://api.test")
+
+	for i := 0; i < aiMemoryTurns*3; i++ {
+		h.rememberAiTurn(-1001, "q", "a")
+	}
+	if got := len(h.aiHistory(-1001)); got > aiMemoryTurns {
+		t.Errorf("history holds %d turns, cap is %d", got, aiMemoryTurns)
+	}
+}
+
+func TestRenderAIHistoryHandlesEmptyInput(t *testing.T) {
+	if got := renderAIHistory(nil); got != "" {
+		t.Errorf("empty history should render nothing, got %q", got)
+	}
+}
+
+// The language line has exactly one home: aiPrompt, applied by aiReply on the way
+// out. It used to be applied by aiPromptWithHistory too, which doubled it on the
+// first message of a chat and left the history framing with no language at all.
+func TestLanguageInstructionAppearsOnce(t *testing.T) {
+	history := []aiTurn{
+		{Role: "user", Text: "salam"},
+		{Role: "assistant", Text: "wa adai"},
+		{Role: "user", Text: "kaisay"},
+	}
+
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"first message, no history", aiPrompt("ur", aiPromptWithHistory("salam", nil, 2000))},
+		{"with history", aiPrompt("ur", aiPromptWithHistory("aur kya?", history, 2000))},
+	}
+	for _, tc := range cases {
+		if n := strings.Count(tc.text, "Reply in"); n != 1 {
+			t.Errorf("%s: language line appears %d times, want 1:\n%s", tc.name, n, tc.text)
+		}
+		if !strings.Contains(tc.text, localization.LanguageName("ur")) {
+			t.Errorf("%s: Urdu not named:\n%s", tc.name, tc.text)
+		}
+	}
+
+	// The newest message has to stay the last thing the model reads.
+	if got := cases[1].text; !strings.HasSuffix(got, "aur kya?") {
+		t.Errorf("newest message is no longer last:\n%s", got)
+	}
+}
+
+// English is left alone, so the prefix does not appear at all.
+func TestEnglishGetsNoLanguagePrefix(t *testing.T) {
+	for _, lang := range []string{"", "en"} {
+		if got := aiPrompt(lang, "hello"); got != "hello" {
+			t.Errorf("lang=%q: got %q, want the bare message", lang, got)
+		}
+	}
+}
+
+// #3: opening a command replaces sess.Data with an empty map. Kraken's memory
+// used to live there, so /qr threw the conversation away without /ai forget.
+func TestAiHistorySurvivesCommandStateReset(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{"getMe": {okMe}}}
+	h := igHandler(t, api, "https://api.test")
+	const chat = 5150
+
+	h.rememberAiTurn(chat, "my name is Sam", "nice to meet you Sam")
+	if len(h.aiHistory(chat)) != 2 {
+		t.Fatalf("history was not stored: %+v", h.aiHistory(chat))
+	}
+
+	// Exactly what /qr and 19 other commands do.
+	h.store.SetSessionData(chat, make(map[string]interface{}))
+
+	if got := h.aiHistory(chat); len(got) != 2 {
+		t.Errorf("command state reset wiped the conversation: %+v", got)
+	}
+
+	h.forgetAI(chat)
+	if got := h.aiHistory(chat); len(got) != 0 {
+		t.Errorf("/ai forget did not clear the conversation: %+v", got)
+	}
+}
+
+// #4: the frame was budgeted against 3400 while aiReply truncates to 2000, and
+// truncation keeps the head — which is the history. The question was the part
+// that got thrown away.
+func TestHistoryFrameNeverExceedsTheRequestLimit(t *testing.T) {
+	history := make([]aiTurn, 0, aiMemoryTurns)
+	for i := 0; i < aiMemoryTurns; i++ {
+		history = append(history,
+			aiTurn{Role: "user", Text: strings.Repeat("h", 300)},
+			aiTurn{Role: "agent", Text: strings.Repeat("a", 300)})
+	}
+
+	const limit = 2000
+	question := "what did I just ask?"
+	got := aiPromptWithHistory(question, history, limit)
+	if n := len([]rune(got)); n > limit {
+		t.Errorf("frame is %d runes, over the %d the endpoint accepts", n, limit)
+	}
+	if !strings.HasSuffix(got, question) {
+		t.Errorf("the question must survive intact, got %q", got)
+	}
+
+	// A question that leaves no room at all must be sent bare, never truncated.
+	long := strings.Repeat("q", limit+500)
+	got = aiPromptWithHistory(long, history, limit)
+	if got != long {
+		t.Errorf("an oversized question must be passed through whole, got %d runes", len([]rune(got)))
 	}
 }

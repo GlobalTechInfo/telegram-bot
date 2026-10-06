@@ -40,6 +40,26 @@ Every update runs in its own goroutine, capped by the `maxUpdateWorkers` semapho
 2. **Callback** (button press) → `HandleCallback` — switches on `cb.Data`
 3. **Message** (text) → `HandleMessage` — switches on `sess.State`
 4. **Auto-detect** (idle state) → `HandleMessage` default case — checks URL patterns, starts download flow
+5. **Channel post** → `HandleChannelPost`
+6. **Inline query** → `HandleInline`
+
+`main.go` must subscribe to every one of these. `AllowedUpdates` was never set,
+and Telegram's default list excludes `channel_post` and `inline_query` — the bot
+could not receive channel posts or inline queries at all. The list is explicit
+now.
+
+**Inline mode cannot be enabled from the Bot API.** There is no `setInlineMode`
+method; it is `/setinline` in @BotFather, which asks for a placeholder string.
+`EnableInline` only reads `supports_inline_queries` from getMe and warns with
+that instruction. It used to send a `setInlineMode` request that could only ever
+fail, while the README told operators BotFather was unnecessary.
+
+A link button may never carry a URL in `callback_data`: that field is capped at
+64 bytes, a reddit permalink or pronunciation URL exceeds it, and Telegram
+rejects the whole `sendMessage` with `BUTTON_DATA_INVALID`. Use
+`NewInlineKeyboardButtonURL`. Same rule in the opposite direction: Telegram only
+accepts `A-Za-z0-9_-` in a start parameter, so `deepLinkURL` base64url-encodes
+the token and refuses anything over 64 characters.
 
 ### State Machine
 
@@ -73,6 +93,18 @@ States used in `sess.State`:
 | `awaiting_image_effect` | Image Effect → blur/brightness/etc | Photo upload → POST to `/sharp/EFFECT` |
 | `awaiting_artistic_effect` | Artistic Effect → pencilSketch/etc | Photo upload → POST to `/sharp/EFFECT` |
 | `awaiting_news_query` | News → Google News | Save query → fetchGoogleNews |
+| `awaiting_define_word` | `/define` | Save word → fetchDefine |
+| `awaiting_translate_text` | `/translate` | Save text → target picker or fetchTranslate |
+| `awaiting_translate_lang` | reply-to-`/translate` | Text already known → picker then fetchTranslate |
+| `awaiting_media` | `/media` | Photo upload → show ops |
+| `awaiting_media_trim` | Trim button | Read `12` or `12-40` → run the trim |
+| `awaiting_reddit_sub` | `/reddit` | Save subreddit → fetchReddit |
+| `awaiting_channel_post` | channel post | N/A — auto-detect, never a state |
+
+`awaiting_translate_text` and `awaiting_translate_lang` share one case on
+purpose: the translate body used to sit under a case labelled
+`awaiting_define_word`, so `awaiting_translate_text` had no case at all and typed
+text fell through to the default branch (which handed it to Kraken).
 
 ### Adding a New Downloader
 
@@ -213,6 +245,18 @@ Response shapes, as consumed by the engine:
 | `capcut` | `/capdown/download` | `template-detail` links only |
 | `imdb` | `/download/imdb` | `data.result[]` of `{image, video_hd, video_sd}` |
 
+## Searcher Registry
+
+`handlers/search.go` is the same idea applied to search: 21 entries covering
+media searches, news, sports and shorteners. `runSearcher` renders by `kind`
+(`kindMedia`, `kindNews`, `kindSports`, `kindShortURL`), so a new source is one
+registry line and no new function. It replaced 22 near-identical functions and took
+`handlers.go` from 4241 to 2789 lines.
+
+Fields: `id`, `name`, `endpoint`, `param`, `listPath`, `urlKeys`, `titleKeys`,
+`kind`, `count`, `noQuery` (feed takes no query string), `resolve` (custom media
+extractor, e.g. stickers), `noResults`.
+
 ## Download Infrastructure
 
 - **`mediaClient`**: One shared `*http.Client` for every outbound request (dial 10s, TLS 10s, response headers 20s, total 180s, bounded idle conns). Never use bare `http.Get` — the stdlib default has no timeout, so one stalled CDN pins a goroutine and a `dlSem` slot forever.
@@ -230,13 +274,21 @@ Response shapes, as consumed by the engine:
 `handlers/ai.go` answers anything that is not a command, a forward, a link or a
 pending prompt. Config lives under `ai` in config.json: `enabled`, `name`,
 `owner`, `apiBaseUrl`, `apiKey`, `maxInputChars`, `cooldownSeconds`.
-`EffectiveAiBaseURL()` and `EffectiveAiKey()` prefer `AI_BASE_URL` / `AI_KEY`, and
-the key is **blank in config.json on purpose** so no secret is committed.
+`EffectiveAiBaseURL()` and `EffectiveAiKey()` prefer `AI_BASE_URL` / `AI_KEY`, so
+a deployment can keep the key in `.env` instead. The operator chose to commit the
+key in config.json, so it is **not** blank — do not "fix" that back to empty.
 
-The endpoint is `GET <base>/?apikey=KEY&text=...` and the answer lives at
-`data.choices[0].message.content`, not at the top level. It only accepts a single
-`text` parameter, so the persona, the language and the "behave like a person"
-instructions all travel inside it (`aiPrompt`).
+The endpoint is `GET <base>/?apikey=KEY&lang=LANG&text=...` and the answer lives
+at `data.choices[0].message.content`, not at the top level. It takes a single
+`text` parameter, so the persona and the "behave like a person" instructions live
+in the Worker's system prompt. The language travels **twice on purpose**: as
+`lang`, which the Worker turns into `Write only in <language>`, and as a line
+inside `text` (`aiPrompt`), so a Worker that ignored `lang` would still get it.
+
+**`aiPrompt` is the only place the language line is applied.** It used to also be
+applied by `aiPromptWithHistory`, which doubled it on the first message of a chat
+and left the history framing with none. `TestLanguageInstructionAppearsOnce`
+guards that.
 
 Rules the cleanup enforces, each of which the model actually does:
 
@@ -255,6 +307,58 @@ Rules the cleanup enforces, each of which the model actually does:
   3s per-chat cooldown lives in memory (`aiCooldown`), never in bbolt.
 - Everything Kraken sees goes to a third-party endpoint, so the gate deliberately
   sits last in the fallback chain.
+
+Kraken **remembers the chat**: `aiPromptWithHistory` replays earlier turns so
+"what did I just ask?" works. The newest turn stays last, and the whole frame is
+dropped rather than truncated when it would exceed `aiTotalRunes`.
+
+## Markdown Escaping of Third-Party Text
+
+`sendMsg` sets `ParseMode: "Markdown"`, and `h.p()` only prepends the bot
+prefix — it does **not** escape. Any value that came from an external API has to
+go through `escapeMarkdown` before it reaches a message, or the send is lost.
+
+This is not hypothetical: Google writes a space as `_` in Urdu, so `/translate`
+produced `آپ_کیسے_ہیں`, an unpaired underscore, and Telegram rejected the whole
+message. `translate`, news headlines, `define`, `weather` and sports results
+were all affected. `TestTranslateEscapesMarkdown` guards it.
+
+`h.p()` must **not** be called inside a string that will be handed to `sendMsg`
+or `sendPlain`, which prefix the whole message themselves. The sports renderer
+did, so every fixture line carried its own copy of the prefix.
+
+## Stickers: There Is No Bot Pack
+
+`tools.sticker` has no pack name or title, on purpose. `createNewStickerSet` and
+`addStickerToSet` both take `user_id` for the **owner** of the set, and Telegram
+answers `USER_IS_BOT` when that is a bot: a sticker set is owned by a person, and
+a bot may only edit a set a person already created. There is no way for a bot to
+own a pack.
+
+So `sendSticker` posts the sticker to the chat with `sendSticker`, which is what
+a user wants from a sticker search anyway — they long-press it and add it to
+their own collection. Do not reintroduce pack creation.
+
+`toStickerPNG` produces 512x512 PNG because Telegram insists on exactly one side
+being 512 and neither over. `resizeImage` refuses to enlarge, which is right for a
+download and wrong here, so stickers go through `scaleTo`.
+
+## Video Editing Needs ffmpeg
+
+`resolveFFmpeg` tries the configured path, then `ffmpeg` on `PATH`, then the two
+usual absolute locations, and returns `""` when there is none. `MediaOpsMenu` and
+`mediaOpKind` both consult `ffmpegAvailable()`, so the video buttons are **hidden**
+rather than shown and then failing — including trim, which is ffmpeg-backed like
+the rest. The `/media` menu button itself is gated on `tools.media.enabled`, not on
+ffmpeg, because the six photo edits are pure Go.
+
+The Dockerfile installs Debian's ffmpeg. Its `libopus` support is what the voice
+note needs; a hand-rolled static build usually lacks it and fails at runtime, not
+at build time.
+
+`debug.SetMemoryLimit` does **not** cover ffmpeg, since it is a subprocess. The GIF
+conversion is the one operation that holds every frame at once, so it is capped at
+`gifMaxSeconds`/`gifFps` and every ffmpeg call passes `-threads 2`.
 
 ## Memory Tuning
 

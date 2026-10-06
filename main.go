@@ -145,14 +145,35 @@ func main() {
 	tuneMemory(env)
 	logEffectiveConfig(env, cfg)
 
+	handlers.ConfigureMediaTools(cfg.Tools.Media.FFmpegPath)
+
 	store := session.NewStore(dbPath)
 	defer store.Close()
 	store.Cleanup()
 
 	handler := handlers.New(bot, cfg, store, token)
+	// Inline mode is enabled here rather than left to BotFather, because a query
+	// that never reaches the bot is indistinguishable from a broken feature.
+	handler.EnableInline()
+	handler.StartDigest()
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+	// Without this, Telegram applies a default list that leaves out
+	// channel_post and inline_query. The bot then never sees a single message
+	// posted in a channel, which is why /channels always came back empty, and
+	// inline queries never arrive at all.
+	u.AllowedUpdates = []string{
+		"message",
+		"edited_message",
+		"channel_post",
+		"edited_channel_post",
+		"inline_query",
+		"chosen_inline_result",
+		"callback_query",
+		"my_chat_member",
+		"chat_member",
+	}
 
 	updates := bot.GetUpdatesChan(u)
 
@@ -259,6 +280,9 @@ func main() {
 			} else if u.Message != nil {
 				logUpdate(u.Message.Chat, u.Message.From, "msg", "")
 				handler.HandleMessage(u)
+			} else if u.ChannelPost != nil {
+				logUpdate(u.ChannelPost.Chat, nil, "channel_post", "")
+				handler.HandleChannelPost(u)
 			}
 		}(update)
 	}

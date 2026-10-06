@@ -10,6 +10,10 @@ services:
     environment:
       - DB_PATH=/bot/data/bot.db
       - PORT=8080
+      # Video editing (trim, audio, voice, GIF) needs real headroom: it shells out
+      # to ffmpeg, and Go's soft limit does not cover a subprocess. Leave this at
+      # 400 if you only use the photo buttons.
+      - MEM_LIMIT_MB=${MEM_LIMIT_MB:-400}
     ports:
       # only needed for local health checks; the bot long-polls Telegram
       - "8080:8080"
