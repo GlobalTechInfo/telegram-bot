@@ -243,7 +243,10 @@ func (h *Handler) handleTranslateState(chat *tgbotapi.Chat, msg *tgbotapi.Messag
 	case "awaiting_translate_lang":
 		h.store.SetState(uid, "idle")
 		text, _ := sess.Data["tr_text"].(string)
-		target := strings.TrimSpace(lang)
+		// The target comes from the picker, not from lang. lang is the chat's
+		// interface language, so typing "urdu" instead of tapping the button used
+		// to translate into whatever the chat was set to — usually English.
+		target := h.translateTargetOf(sess)
 		if text == "" || target == "" {
 			h.store.SetState(uid, "awaiting_translate_text")
 			h.store.SetSessionData(uid, make(map[string]interface{}))

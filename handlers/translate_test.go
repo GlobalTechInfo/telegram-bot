@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,5 +113,62 @@ func waitForText(t *testing.T, api *stubAPI) string {
 			return ""
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The target has to come from the picker. lang is the chat's interface
+// language, so reading the target from it made a typed language translate into
+// whatever the chat happened to be set to — usually English.
+func TestTranslateUsesTheChosenTargetNotTheChatLanguage(t *testing.T) {
+	// Record what target the bot actually asked the API for.
+	var gotTarget string
+	var mu sync.Mutex
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":       {okMe},
+		"sendMessage": {`{"ok":true,"result":{}}`},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotTarget = r.URL.Query().Get("to")
+		mu.Unlock()
+		w.Write([]byte(`{"success":true,"data":{"translation":"ok","detectedLanguage":"en"}}`))
+	}))
+	defer srv.Close()
+
+	h := igHandler(t, api, srv.URL)
+	const chat, uid = 9090, 9090
+
+	// The picker stored "ur"; the chat is set to English.
+	h.startTranslate(chat, uid, "en", "hello there")
+	sess := h.store.GetOrCreate(uid)
+	if sess.State != "awaiting_translate_lang" {
+		t.Fatalf("state = %q", sess.State)
+	}
+	sess.Data["tr_target"] = "ur"
+	h.store.SetSessionData(uid, sess.Data)
+
+	msg := &tgbotapi.Message{MessageID: 5,
+		Chat: &tgbotapi.Chat{ID: chat},
+		From: &tgbotapi.User{ID: uid},
+		Text: "urdu",
+	}
+	// fetchTranslate runs in a goroutine, so wait for the request to land.
+	h.handleTranslateState(msg.Chat, msg, uid, "en")
+
+	var target string
+	for i := 0; i < 200; i++ {
+		mu.Lock()
+		target = gotTarget
+		mu.Unlock()
+		if target != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if target == "" {
+		t.Fatal("the translation request never reached the API")
+	}
+	if target != "ur" {
+		t.Errorf("target = %q, want ur — it took the chat's language, not the picker's", target)
 	}
 }
