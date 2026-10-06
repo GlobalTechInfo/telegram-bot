@@ -348,12 +348,17 @@ Install and run in one command — the script will prompt for your BOT_TOKEN and
 | **Termux** | `pkg install curl -y && bash <(curl -sL https://raw.githubusercontent.com/GlobalTechInfo/telegram-bot/main/install.sh)` |
 
 The installer will:
-1. Install Git and Go if missing
+1. Install Git and Go if missing, and refuse to continue on anything below Go 1.25
 2. Clone the repository
 3. **Prompt for BOT_TOKEN** (and optionally ADMIN_IDS, API_URL, API_KEY)
 4. Build the binary
-5. Create a system-wide shortcut (`telegram-bot`)
-6. **Start the bot automatically**
+5. Install **ffmpeg** if it is missing, which is what the `/media` video buttons need
+6. Create a system-wide shortcut (`telegram-bot`)
+7. Optionally register a **systemd service** on Linux, so the bot survives logout and restarts on boot
+8. **Start the bot** — in the foreground, or as the service if you took step 7
+
+It finishes by reminding you to run `/setinline` in **@BotFather**. Inline mode has
+no Bot API method, so that step is on you; everything else works without it.
 
 ## Deployment
 

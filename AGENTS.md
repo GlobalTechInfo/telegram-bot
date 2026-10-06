@@ -360,6 +360,22 @@ at build time.
 conversion is the one operation that holds every frame at once, so it is capped at
 `gifMaxSeconds`/`gifFps` and every ffmpeg call passes `-threads 2`.
 
+## Installers
+
+`install.sh` and `install.ps1` must stay in step with the feature set, because a
+native install is the other way to run this besides Docker. Two things bit:
+
+- **ffmpeg is installed optionally, not required.** Video buttons need it, the
+  photo buttons do not, so a failure is a warning rather than a fatal error.
+- **`.env.example` must not carry an uncommented placeholder key.** An env value
+  overrides `config.json`, so a commented-out-in-spirit `AI_KEY=your-ai-key` wins
+  over the real key and every agent request then 401s, leaving Kraken silent.
+  Placeholders stay commented.
+
+The Linux installer offers a systemd unit, and when it is enabled it must not
+also `exec ./telegram-bot`: two processes on one long-poll means Telegram drops
+updates at random.
+
 ## Memory Tuning
 
 `main.go:tuneMemory` runs before anything else allocates:
