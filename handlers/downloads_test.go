@@ -343,7 +343,7 @@ func TestFormatModeSendsChosenFormat(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"data":    map[string]interface{}{"url": srvHost(r) + "/v/720.mp4"},
+			"data":    map[string]interface{}{"downloadUrl": srvHost(r) + "/v/720.mp4"},
 		})
 	}))
 	defer srv.Close()
@@ -379,7 +379,7 @@ func TestAudioFormatForcesAudioDelivery(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": true,
-				"data":    map[string]interface{}{"url": srvHost(r) + "/a/song.mp3"},
+				"data":    map[string]interface{}{"downloadUrl": srvHost(r) + "/a/song.mp3"},
 			})
 			return
 		}
@@ -398,6 +398,68 @@ func TestAudioFormatForcesAudioDelivery(t *testing.T) {
 	}
 	if n := len(api.callsFor("sendDocument")); n != 0 {
 		t.Errorf("mp3 must not fall back to a document, got %d", n)
+	}
+}
+
+// A real yt response carries a poster and a source endpoint beside the file,
+// and the file URL is a proxy with no extension in its path. The chosen file
+// must be what goes out: the generic path skipped it as a video and delivered
+// the thumbnail instead.
+func TestYoutubeDeliversChosenFileNotThumbnail(t *testing.T) {
+	for _, c := range []struct {
+		format string
+		send   string
+	}{
+		{"720", "sendVideo"},
+		{"mp3", "sendAudio"},
+	} {
+		t.Run(c.format, func(t *testing.T) {
+			api := &stubAPI{responders: map[string][]string{
+				"getMe":       {okMe},
+				c.send:        {`{"ok":true,"result":{}}`},
+				"sendMessage": {`{"ok":true,"result":{}}`},
+			}}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/file":
+					w.Header().Set("Content-Type", "video/mp4")
+					w.Write([]byte{0, 0, 0, 0x18, 'f', 't', 'y', 'p'})
+				case "/poster.jpg":
+					w.Header().Set("Content-Type", "image/jpeg")
+					w.Write([]byte{0xFF, 0xD8, 0xFF, 0xD9})
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": true,
+						"data": map[string]interface{}{
+							"success":     true,
+							"videoId":     "KEana7kAnhQ",
+							"title":       "Can Saudi Arabia Stop Houthi Attacks?",
+							"thumbnail":   srvHost(r) + "/poster.jpg",
+							"format":      c.format,
+							"downloadUrl": srvHost(r) + "/file?f=clip-720.mp4",
+							"sourceUrl":   srvHost(r) + "/source",
+						},
+						"cached": false,
+					})
+				}
+			}))
+			defer srv.Close()
+
+			h := igHandler(t, api, srv.URL)
+			yt, _ := dlByID("yt")
+			h.resolveDownload(yt, -1001, -1001, "https://youtu.be/abc", c.format, "en")
+
+			if n := len(api.callsFor(c.send)); n != 1 {
+				t.Errorf("want the chosen %s sent once, got %d %s calls", c.format, n, c.send)
+			}
+			if n := len(api.callsFor("sendPhoto")); n != 0 {
+				t.Errorf("the thumbnail must never be sent, got %d photos", n)
+			}
+			if n := len(api.callsFor("sendMediaGroup")); n != 0 {
+				t.Errorf("one chosen file is not a carousel, got %d albums", n)
+			}
+		})
 	}
 }
 
@@ -751,7 +813,7 @@ func TestSuccessfulDownloadReportsCompletion(t *testing.T) {
 				"medias": []interface{}{map[string]interface{}{"type": "video", "url": b + "/v/one.mp4"}}}}
 		},
 		"yt": func(b string) map[string]interface{} {
-			return map[string]interface{}{"success": true, "data": map[string]interface{}{"url": b + "/v/one.mp4"}}
+			return map[string]interface{}{"success": true, "data": map[string]interface{}{"downloadUrl": b + "/v/one.mp4"}}
 		},
 	}
 

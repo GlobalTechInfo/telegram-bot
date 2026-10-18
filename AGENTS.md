@@ -236,6 +236,7 @@ Response shapes, as consumed by the engine:
 
 | Site | Endpoint | Payload |
 |------|----------|---------|
+| `yt` | `/loaderto/download` | `data.downloadUrl`, read by the `options` hook. The response also carries `thumbnail` and `sourceUrl`, and the file URL is a proxy whose path ends at `/loaderto/file` with the extension in the `f=` query parameter, so `isVideoItem` never recognises it and the carousel path delivers the thumbnail instead |
 | `threads` | `/thrdown/download` | `data.title` caption, `data.video` media |
 | `odysee` | `/download/odysee` | `data.result[]` of `{video, image}` |
 | `gh` | `/gitclone/download` | `data.url` zipball |
@@ -264,7 +265,7 @@ extractor, e.g. stickers), `noResults`.
 - **`readBody(resp, limit)`**: Size-capped reader. Rejects on `Content-Length > limit` up front and pre-allocates from the header, instead of `io.ReadAll`'s repeated doubling. Use `maxDownloadSize` (100MB) for media and `maxAPISize` (8MB) for JSON API responses.
 - **`extractURL(v interface{})`**: Returns the *first* URL found, searching arrays from end to start. Only correct for single-file endpoints — for anything that can list several files use `collectURLs`.
 - **`collectURLs(v) []mediaItem`**: Returns *every* URL in document order, deduplicated, with the sibling `title` label attached. Nested list containers (`data`, `items`, `medias`, …) are walked before a wrapper's own scalar fields so a tracker `url` can't shadow the real media list.
-- **`isVideoItem(mediaItem)`**: True for an entry the API labels video/reel or whose URL ends in `.mp4`/`.mov`/`.webm`/`.m4v`. Thumbnail/cover labels always win, so a reel's preview image is never sent as the video.
+- **`isVideoItem(mediaItem)`**: True for an entry the API labels video/reel or whose URL ends in `.mp4`/`.mov`/`.webm`/`.m4v`. Thumbnail/cover labels always win, so a reel's preview image is never sent as the video. The extension is read from the **path only**, so a media URL that proxies the file behind a query parameter is never a video; that is what `ytOptions` exists to bypass.
 - **`maxConcurrentDownloads = 2`**: Semaphore via `dlSem`. Acquire it around one transfer at a time, never around a whole loop of transfers, or a multi-item post blocks every other download for minutes.
 - **Memory cleanup**: Set `body = nil` after sending. Do **not** call `runtime.GC()` — GC pacing is handled by `tuneMemory` in `main.go`.
 - **Options in the session**: picker options are stored as `[]dlStoredOption`, never `[]dlOption`, because `mediaItem` keeps unexported fields and would silently serialise to nothing. Read them back with `loadOptions`.

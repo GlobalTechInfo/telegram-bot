@@ -162,6 +162,7 @@ var downloaders = []downloader{
 		id: "yt", name: "YouTube", cmds: []string{"yt", "download"},
 		hosts:    []string{"youtube.com", "youtu.be", "m.youtube.com"},
 		endpoint: "/loaderto/download", mode: dlFormats, key: "format",
+		options: ytOptions,
 		labels: []dlLabel{
 			{"mp3", "ytFormatMp3", "MP3"},
 			{"360", "ytFormat360", "360p"},
@@ -1241,6 +1242,22 @@ func (h *Handler) handleDownloadPick(d downloader, chatID, uid int64, sel string
 	}
 	h.store.ClearSessionData(chatID)
 	h.deliver(chatID, d, opts[idx], lang)
+}
+
+// ytOptions reads the single file the chosen format asked for.
+//
+// The response also carries a poster and a source endpoint, and the generic
+// walker collects both as post media. The file URL is a proxy whose path ends
+// at "/loaderto/file" with the real extension in the f= query parameter, so
+// isVideoItem does not recognise it, primaryMedia keeps all three, and the
+// carousel path then drops the file as a video and delivers the thumbnail.
+func ytOptions(d downloader, v interface{}, lang string) []dlOption {
+	data, _ := v.(map[string]interface{})["data"].(map[string]interface{})
+	file, _ := data["downloadUrl"].(string)
+	if file == "" {
+		return nil
+	}
+	return []dlOption{{mediaURL: file, items: []mediaItem{{url: file}}}}
 }
 
 // fbOptions reads Facebook's allQualities list, falling back to the single
