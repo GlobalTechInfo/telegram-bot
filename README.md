@@ -1,6 +1,10 @@
-# Telegram Multipurpose Bot
+<div align="center">
+<a href="https://ibb.co/0yvdn9dV"><img src="https://i.ibb.co/TMdFw0Fq/1790779164789.jpg" alt="1790779164789" border="0"></a>
+</div>
 
-A feature-rich multipurpose Telegram bot with media downloading, search engines, text/image effects, URL shortener, news, sports scores, group and channel administration, reminders, and 13 languages. Built with Go, uses BoltDB for persistence.
+**A feature-rich multipurpose Telegram bot with media downloading, search engines, text/image effects, URL shortener, news, sports scores, group and channel administration, and 13 languages. Built with Go, uses BoltDB for persistence.**
+
+---
 
 ## Interface
 
