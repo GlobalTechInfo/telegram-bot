@@ -476,7 +476,10 @@ func (h *Handler) downloadMenu(lang string) tgbotapi.InlineKeyboardMarkup {
 		if localization.Has(d.id+"Menu", lang) {
 			label = localization.Get(d.id+"Menu", lang)
 		}
-		entries = append(entries, keyboards.DownloadEntry{ID: d.id, Label: label, Enabled: h.cfg.IsCommandEnabled(d.id)})
+		// A site that can only be delivered through ffmpeg is hidden rather than
+		// shown and then failing, which is what the media ops menu does too.
+		enabled := h.cfg.IsCommandEnabled(d.id) && (!d.hls || ffmpegAvailable())
+		entries = append(entries, keyboards.DownloadEntry{ID: d.id, Label: label, Enabled: enabled})
 	}
 	return keyboards.DownloadMenu(entries, lang)
 }

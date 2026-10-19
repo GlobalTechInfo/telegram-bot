@@ -186,9 +186,10 @@ func TestAutoDetectCoversSocialAndNewSites(t *testing.T) {
 		"sc": true, "tw": true,
 		"threads": true, "vidsplay": true, "odysee": true,
 		"istock": true, "alamy": true, "capcut": true, "imdb": true,
-		"spotify": true,
-		"likee":   true,
-		"gh":      false,
+		"spotify":    true,
+		"likee":      true,
+		"soundcloud": true,
+		"gh":         false,
 	}
 	for _, d := range downloaders {
 		want, known := auto[d.id]
@@ -580,6 +581,14 @@ func TestDownloadMenuListsEveryEnabledSite(t *testing.T) {
 		}
 	}
 	for _, d := range downloaders {
+		// A site that cannot be delivered without ffmpeg is hidden when ffmpeg
+		// is absent, so it is the one case where "missing" is the right answer.
+		if d.hls && !ffmpegAvailable() {
+			if seen[d.id] {
+				t.Errorf("%s needs ffmpeg and is absent, but it is on the menu", d.id)
+			}
+			continue
+		}
 		if !seen[d.id] {
 			t.Errorf("%s is missing from the download menu", d.id)
 		}
@@ -623,7 +632,7 @@ func TestFullDownloaderInventory(t *testing.T) {
 		"yt": true, "ig": true, "tt": true, "fb": true, "pin": true, "sc": true, "tw": true,
 		"threads": true, "gh": true, "vidsplay": true, "odysee": true,
 		"istock": true, "alamy": true, "capcut": true, "imdb": true,
-		"spotify": true, "likee": true,
+		"spotify": true, "likee": true, "soundcloud": true,
 	}
 	for _, d := range downloaders {
 		if !want[d.id] {
@@ -634,8 +643,8 @@ func TestFullDownloaderInventory(t *testing.T) {
 	for id := range want {
 		t.Errorf("downloader %q is missing", id)
 	}
-	if len(downloaders) != 17 {
-		t.Errorf("expected 17 downloaders, got %d", len(downloaders))
+	if len(downloaders) != 18 {
+		t.Errorf("expected 18 downloaders, got %d", len(downloaders))
 	}
 }
 

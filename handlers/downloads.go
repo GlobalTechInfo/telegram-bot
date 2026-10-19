@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -155,6 +158,11 @@ type downloader struct {
 	// GitHub's only takes owner/repo, so everything else is reported as
 	// unsupported instead of being sent to the API to fail there.
 	match func(u *url.URL) bool
+	// hls marks an endpoint that hands back a playlist rather than a file.
+	// SoundCloud answers with a .m3u8 and no streamable media URL, and a
+	// playlist is a list of segment references, so it is resolved with ffmpeg
+	// into one file before delivery. Sites without it are fetched directly.
+	hls bool
 }
 
 var downloaders = []downloader{
@@ -243,6 +251,12 @@ var downloaders = []downloader{
 		hosts:    []string{"likee.video"},
 		endpoint: "/likee/download", mode: dlSingle,
 		options: likeeOptions, match: likeeCode,
+	},
+	{
+		id: "soundcloud", name: "SoundCloud", cmds: []string{"soundcloud"},
+		hosts:    []string{"soundcloud.com"},
+		endpoint: "/soundcloud/download", mode: dlSingle,
+		options: fileOption, hls: true,
 	},
 
 	{
@@ -942,6 +956,50 @@ func itemLabel(d downloader, item interface{}, i int) string {
 	return fmt.Sprintf("%s %d", d.name, i+1)
 }
 
+// fetchHLS resolves a playlist into a single audio file with ffmpeg.
+//
+// ffmpeg fetches the playlist itself rather than going through mediaClient:
+// the playlist is a few kilobytes of segment references, and letting it do the
+// fetching avoids buffering the whole track in Go only to hand it straight back.
+// The output is AAC in MP4 because Telegram takes that for an audio file, and
+// two threads because the conversion is CPU-bound and runs beside everything
+// else the bot is doing.
+func fetchHLS(playlistURL string) ([]byte, string, error) {
+	if !ffmpegAvailable() {
+		return nil, "", fmt.Errorf("ffmpeg is not available")
+	}
+	outPath, err := tempFile("hls", ".m4a")
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.Remove(outPath)
+
+	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-threads", "2",
+		"-i", playlistURL, "-vn", "-c:a", "aac", "-b:a", "128k", outPath}
+
+	ctx, cancel := context.WithTimeout(context.Background(), ffmpegTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, "", fmt.Errorf("hls: timed out after %s", ffmpegTimeout)
+		}
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 200 {
+			msg = msg[:200]
+		}
+		return nil, "", fmt.Errorf("hls: %v %s", err, msg)
+	}
+	res, err := os.ReadFile(outPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(res) == 0 {
+		return nil, "", fmt.Errorf("hls produced nothing")
+	}
+	return res, "audio/mp4", nil
+}
+
 // deliver sends one resolved option, choosing between a video, an album of
 // images and a single file from what it holds.
 func (h *Handler) deliver(chatID int64, d downloader, o dlOption, lang string) {
@@ -970,7 +1028,16 @@ func (h *Handler) deliver(chatID int64, d downloader, o dlOption, lang string) {
 	}
 
 	h.acquireDL()
-	body, ct, err := fetchMedia(items[0].url)
+	var (
+		body []byte
+		ct   string
+		err  error
+	)
+	if d.hls {
+		body, ct, err = fetchHLS(items[0].url)
+	} else {
+		body, ct, err = fetchMedia(items[0].url)
+	}
 	h.releaseDL()
 	if err != nil {
 		log.Printf("%s download failed: %v", d.id, err)

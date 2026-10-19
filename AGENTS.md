@@ -206,8 +206,9 @@ site is data, so wiring a new one never means touching a handler:
 | `mode` | `dlSingle` (one post), `dlList` (pick one) or `dlFormats` (fixed list) |
 | `key`, `labels` | `dlFormats` query parameter and its buttons, each label carrying a key plus a plain fallback so a new site needs no translations |
 | `manualOnly` | keep the site out of auto-detection (GitHub: a pasted repo link is usually not a request to zip a repo) |
-| `match` | restrict a host to the URL shapes the endpoint accepts; anything else is reported with `dlUnsupported` instead of failing inside the API (GitHub takes only `owner/repo`) |
+| `match` | restrict a host to the URL shapes the endpoint accepts; anything else is reported with `dlUnsupported` instead of failing inside the API (GitHub takes only `owner/repo`, Likee only `l.likee.video/v/<code>`) |
 | `fileExt` | payload extension for when neither Content-Type nor the URL says what the file is (GitHub's zipball) |
+| `hls` | the endpoint returns an HLS playlist, not a file. `fetchHLS` resolves it with ffmpeg before delivery, and the menu button is hidden when ffmpeg is absent, the way `MediaOpsMenu` does it (SoundCloud) |
 
 Flow: `handleDownloadURL` → `resolveDownload` → `apiJSON` → `dlOptions` → either
 `deliver` (one file) or `sendCarousel` (album of 10) → `sendResult`.
@@ -230,7 +231,8 @@ Rules the engine enforces, all of which were bugs once:
   fails if an API host or key is written into any non-test Go file.
 
 Registered sites: `yt`, `ig`, `tt`, `fb`, `pin`, `sc`, `tw`, `threads`, `gh`,
-`vidsplay`, `odysee`, `istock`, `alamy`, `capcut`, `imdb` (15).
+`vidsplay`, `odysee`, `istock`, `alamy`, `capcut`, `imdb`, `spotify`, `likee`,
+`soundcloud` (18).
 
 Response shapes, as consumed by the engine:
 
@@ -245,6 +247,9 @@ Response shapes, as consumed by the engine:
 | `alamy` | `/download/alamy` | `data.result`, a list |
 | `capcut` | `/capdown/download` | `template-detail` links only |
 | `imdb` | `/download/imdb` | `data.result[]` of `{image, video_hd, video_sd}` |
+| `spotify` | `/spotify/download` | `data.download`, one file, read by `fileOption`. `data.cover` is the artwork; the file URL is an extensionless `/tunnel` proxy |
+| `likee` | `/likee/download` | `data.withoutwatermark`. `data.withWatermark` is the same file and `data.thumbnail` the poster; all three are videos-or-image in one post, so the carousel path skips every one of them and ends with an empty album |
+| `soundcloud` | `/soundcloud/download` | `data.downloadUrl` is a `.m3u8`, not a file. `fetchHLS` resolves it with ffmpeg |
 
 ## Searcher Registry
 

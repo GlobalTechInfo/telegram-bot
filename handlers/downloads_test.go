@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -577,6 +580,146 @@ func TestLikeeRejectsUnsupportedLinkShapes(t *testing.T) {
 			t.Errorf("%s should be accepted, got %+v", good, hit)
 		}
 	}
+}
+
+// SoundCloud answers with an HLS playlist rather than a file, so the track has
+// to be resolved with ffmpeg before it can be sent, and it must go out as audio.
+func TestSoundCloudResolvesPlaylistToAudio(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":       {okMe},
+		"sendAudio":   {`{"ok":true,"result":{}}`},
+		"sendMessage": {`{"ok":true,"result":{}}`},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"id":      293,
+				"title":   "Flickermood",
+				"artist":  "Forss",
+				"artwork": srvHost(r) + "/art.jpg",
+				"downloadUrl": srvHost(r) + "/playlist.m3u8" +
+					"?Expires=1&Policy=abc&Signature=xyz&Key-Pair-Id=K1",
+				"format":   "audio/mp4; codecs=\"mp4a.40.2\"",
+				"protocol": "hls",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	h := igHandler(t, api, srv.URL)
+	d, _ := dlByID("soundcloud")
+	old := ffmpegPath
+	ffmpegPath = fakeFFmpeg(t)
+	defer func() { ffmpegPath = old }()
+
+	h.resolveDownload(d, -1001, -1001, "https://soundcloud.com/forss/flickermood", "", "en")
+
+	if n := len(api.callsFor("sendAudio")); n != 1 {
+		t.Errorf("want the track sent once, got %d sendAudio calls", n)
+	}
+	if n := len(api.callsFor("sendPhoto")); n != 0 {
+		t.Errorf("the artwork must never be sent, got %d photos", n)
+	}
+	if n := len(api.callsFor("sendMediaGroup")); n != 0 {
+		t.Errorf("one track is not a carousel, got %d albums", n)
+	}
+}
+
+// The real thing: ffmpeg resolving a playlist into one audio file. SoundCloud
+// hands back a .m3u8, so this is the only path that can deliver one, and a stub
+// would not prove it. Skipped where ffmpeg is absent, which is also when the
+// site is hidden from the menu.
+func TestFetchHLSResolvesAPlaylist(t *testing.T) {
+	bin := resolveFFmpeg("")
+	if bin == "" {
+		t.Skip("ffmpeg is not installed")
+	}
+	old := ffmpegPath
+	ffmpegPath = bin
+	defer func() { ffmpegPath = old }()
+
+	dir := t.TempDir()
+	build := exec.Command(bin, "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-c:a", "aac", "-f", "hls", "-hls_time", "1", "-hls_playlist_type", "vod",
+		"-hls_list_size", "0", "-hls_segment_filename", filepath.Join(dir, "seg%d.ts"), filepath.Join(dir, "p.m3u8"))
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Skipf("cannot build a fixture playlist: %v %s", err, out)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := os.ReadFile(filepath.Join(dir, filepath.Base(r.URL.Path)))
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	body, ct, err := fetchHLS(srv.URL + "/p.m3u8")
+	if err != nil {
+		t.Fatalf("fetchHLS: %v", err)
+	}
+	if len(body) == 0 {
+		t.Fatal("fetchHLS returned nothing")
+	}
+	if ct != "audio/mp4" {
+		t.Errorf("content type %q, want audio/mp4", ct)
+	}
+	if !sniffVideo(body) {
+		t.Error("output is not an MP4 container")
+	}
+}
+
+// fakeFFmpeg stands in for the real binary: it records the output path it was
+// asked for and writes a short AAC header there. The playlist URL never has to
+// be fetchable, so the test does not depend on a live SoundCloud CDN.
+func fakeFFmpeg(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg")
+	body := "#!/bin/sh\n" +
+		"for a in \"$@\"; do case \"$a\" in -*) ;; *) last=\"$a\";; esac; done\n" +
+		"printf '\\000\\000\\000\\x18ftypM4A ' > \"$last\"\n" +
+		"echo \"$last\" > \"" + filepath.Join(dir, "outpath") + "\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("fake ffmpeg: %v", err)
+	}
+	return script
+}
+
+// A site that cannot be delivered without ffmpeg must not appear on the menu
+// when ffmpeg is missing.
+func TestHlsSiteHiddenWithoutFFmpeg(t *testing.T) {
+	h, _, _ := newSiteFixture(t, "gh",
+		func(string) map[string]interface{} { return map[string]interface{}{"success": true} },
+		"application/zip", nil, map[string][]string{})
+
+	old := ffmpegPath
+	defer func() { ffmpegPath = old }()
+
+	ffmpegPath = ""
+	if hasButton(h, "soundcloud") {
+		t.Error("soundcloud must be hidden when ffmpeg is unavailable")
+	}
+	ffmpegPath = "/usr/bin/ffmpeg"
+	if !hasButton(h, "soundcloud") {
+		t.Error("soundcloud must be shown when ffmpeg is available")
+	}
+}
+
+func hasButton(h *Handler, id string) bool {
+	for _, row := range h.downloadMenu("en").InlineKeyboard {
+		for _, b := range row {
+			if cb(b) == "dl_"+id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Facebook keeps its image-as-document quirk and its info block.

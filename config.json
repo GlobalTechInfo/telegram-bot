@@ -78,6 +78,10 @@
       "enabled": true,
       "description": "Download Likee videos"
     },
+    "soundcloud": {
+      "enabled": true,
+      "description": "Download SoundCloud tracks"
+    },
     "imdb": {
       "enabled": true,
       "description": "Download IMDb trailers and media"
