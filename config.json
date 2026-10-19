@@ -70,6 +70,10 @@
       "enabled": true,
       "description": "Download Twitter/X posts"
     },
+    "spotify": {
+      "enabled": true,
+      "description": "Download Spotify tracks"
+    },
     "imdb": {
       "enabled": true,
       "description": "Download IMDb trailers and media"

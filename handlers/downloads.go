@@ -233,6 +233,11 @@ var downloaders = []downloader{
 		caption:      twCaption,
 		mediaCaption: true,
 	},
+	{
+		id: "spotify", name: "Spotify", cmds: []string{"spotify"},
+		hosts:    []string{"spotify.com"},
+		endpoint: "/spotify/download", mode: dlSingle, options: fileOption,
+	},
 
 	{
 		id: "threads", name: "Threads", cmds: []string{"threads", "th"},

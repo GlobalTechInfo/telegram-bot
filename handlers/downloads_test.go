@@ -133,10 +133,12 @@ func TestDlByHostMatching(t *testing.T) {
 		{"https://x.com/user/status/1", "tw"},
 		{"https://t.co/abc", "tw"},
 		{"https://twitter.com/user/status/1", "tw"},
+		{"https://open.spotify.com/track/abc", "spotify"},
 		// Lookalike hosts must not match.
 		{"https://notyoutube.com/watch?v=abc", ""},
 		{"https://youtube.com.evil.io/watch", ""},
 		{"https://evil-instagram.com/p/ABC/", ""},
+		{"https://notspotify.com/track/abc", ""},
 		{"https://example.com/video", ""},
 		{"not a url", ""},
 		{"", ""},
@@ -460,6 +462,57 @@ func TestYoutubeDeliversChosenFileNotThumbnail(t *testing.T) {
 				t.Errorf("one chosen file is not a carousel, got %d albums", n)
 			}
 		})
+	}
+}
+
+// A Spotify response carries the cover art beside the file, and the file URL is
+// an extensionless proxy, so the same trap as YouTube applies: the track must
+// be what goes out, as audio.
+func TestSpotifySendsTrackNotCover(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":       {okMe},
+		"sendAudio":   {`{"ok":true,"result":{}}`},
+		"sendMessage": {`{"ok":true,"result":{}}`},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tunnel":
+			w.Header().Set("Content-Type", "audio/mpeg")
+			w.Write([]byte{0xFF, 0xFB, 0x90, 0x00})
+		case "/cover.png":
+			w.Header().Set("Content-Type", "image/png")
+			w.Write([]byte("\x89PNG\r\n\x1a\n"))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data": map[string]interface{}{
+					"type":     "spotify",
+					"title":    "Rick Astley - Never Gonna Give You Up",
+					"artist":   "Rick Astley",
+					"cover":    srvHost(r) + "/cover.png",
+					"download": srvHost(r) + "/tunnel?id=1&redirect=1",
+					"duration": "3:34",
+					"format":   "mp3",
+				},
+				"cached": false,
+			})
+		}
+	}))
+	defer srv.Close()
+
+	h := igHandler(t, api, srv.URL)
+	d, _ := dlByID("spotify")
+	h.resolveDownload(d, -1001, -1001, "https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT", "", "en")
+
+	if n := len(api.callsFor("sendAudio")); n != 1 {
+		t.Errorf("want the track sent once, got %d sendAudio calls", n)
+	}
+	if n := len(api.callsFor("sendPhoto")); n != 0 {
+		t.Errorf("the cover must never be sent, got %d photos", n)
+	}
+	if n := len(api.callsFor("sendMediaGroup")); n != 0 {
+		t.Errorf("one track is not a carousel, got %d albums", n)
 	}
 }
 
