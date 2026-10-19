@@ -162,7 +162,7 @@ var downloaders = []downloader{
 		id: "yt", name: "YouTube", cmds: []string{"yt", "download"},
 		hosts:    []string{"youtube.com", "youtu.be", "m.youtube.com"},
 		endpoint: "/loaderto/download", mode: dlFormats, key: "format",
-		options: ytOptions,
+		options: fileOption,
 		labels: []dlLabel{
 			{"mp3", "ytFormatMp3", "MP3"},
 			{"360", "ytFormat360", "360p"},
@@ -1244,20 +1244,22 @@ func (h *Handler) handleDownloadPick(d downloader, chatID, uid int64, sel string
 	h.deliver(chatID, d, opts[idx], lang)
 }
 
-// ytOptions reads the single file the chosen format asked for.
+// fileOption reads the single file a per-file endpoint returns.
 //
-// The response also carries a poster and a source endpoint, and the generic
-// walker collects both as post media. The file URL is a proxy whose path ends
-// at "/loaderto/file" with the real extension in the f= query parameter, so
-// isVideoItem does not recognise it, primaryMedia keeps all three, and the
-// carousel path then drops the file as a video and delivers the thumbnail.
-func ytOptions(d downloader, v interface{}, lang string) []dlOption {
+// These endpoints answer with the file plus a poster and a source endpoint,
+// and collectURLs takes all three as post media. The file URL is a proxy whose
+// path has no extension, so isVideoItem never sees a video, primaryMedia keeps
+// everything, and the carousel path then drops the file and delivers the poster
+// instead. Only the registry knows which field is the file.
+func fileOption(d downloader, v interface{}, lang string) []dlOption {
 	data, _ := v.(map[string]interface{})["data"].(map[string]interface{})
-	file, _ := data["downloadUrl"].(string)
-	if file == "" {
-		return nil
+	for _, k := range []string{"downloadUrl", "download", "url", "file", "media"} {
+		f, _ := data[k].(string)
+		if strings.HasPrefix(f, "http") {
+			return []dlOption{{mediaURL: f, items: []mediaItem{{url: f}}}}
+		}
 	}
-	return []dlOption{{mediaURL: file, items: []mediaItem{{url: file}}}}
+	return nil
 }
 
 // fbOptions reads Facebook's allQualities list, falling back to the single
