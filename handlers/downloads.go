@@ -238,6 +238,12 @@ var downloaders = []downloader{
 		hosts:    []string{"spotify.com"},
 		endpoint: "/spotify/download", mode: dlSingle, options: fileOption,
 	},
+	{
+		id: "likee", name: "Likee", cmds: []string{"likee"},
+		hosts:    []string{"likee.video"},
+		endpoint: "/likee/download", mode: dlSingle,
+		options: likeeOptions, match: likeeCode,
+	},
 
 	{
 		id: "threads", name: "Threads", cmds: []string{"threads", "th"},
@@ -1267,6 +1273,19 @@ func fileOption(d downloader, v interface{}, lang string) []dlOption {
 	return nil
 }
 
+// likeeOptions picks the watermark-free file. Likee names its two copies of the
+// same video differently and puts a poster beside them, so it cannot use
+// fileOption: both files sit in the post, and the carousel path skips them both
+// because they are videos, which leaves an empty album.
+func likeeOptions(d downloader, v interface{}, lang string) []dlOption {
+	data, _ := v.(map[string]interface{})["data"].(map[string]interface{})
+	f, _ := data["withoutwatermark"].(string)
+	if !strings.HasPrefix(f, "http") {
+		return nil
+	}
+	return []dlOption{{mediaURL: f, items: []mediaItem{{url: f}}}}
+}
+
 // fbOptions reads Facebook's allQualities list, falling back to the single
 // download field when the API offers no quality list.
 func fbOptions(d downloader, v interface{}, lang string) []dlOption {
@@ -1366,6 +1385,18 @@ var ghReserved = map[string]bool{
 	"settings": true, "stargazers": true, "forks": true, "network": true,
 	"commit": true, "commits": true, "notifications": true, "explore": true,
 	"sponsors": true, "discussions": true, "codespaces": true, "marketplace": true,
+}
+
+// likeeCode accepts only l.likee.video/v/<code>, with or without the .html
+// suffix. Verified against the endpoint: the bare domain and the www form are
+// both refused there, and those are the forms most share links use, so the user
+// is told which one to paste instead of watching the request fail.
+func likeeCode(u *url.URL) bool {
+	if u.Hostname() != "l.likee.video" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	return len(parts) == 2 && parts[0] == "v" && parts[1] != ""
 }
 
 // ghRepoPath accepts only github.com/owner/repo, with or without a .git suffix.

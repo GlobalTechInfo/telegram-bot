@@ -74,6 +74,10 @@
       "enabled": true,
       "description": "Download Spotify tracks"
     },
+    "likee": {
+      "enabled": true,
+      "description": "Download Likee videos"
+    },
     "imdb": {
       "enabled": true,
       "description": "Download IMDb trailers and media"

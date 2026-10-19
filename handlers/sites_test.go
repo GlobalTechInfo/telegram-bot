@@ -187,6 +187,7 @@ func TestAutoDetectCoversSocialAndNewSites(t *testing.T) {
 		"threads": true, "vidsplay": true, "odysee": true,
 		"istock": true, "alamy": true, "capcut": true, "imdb": true,
 		"spotify": true,
+		"likee":   true,
 		"gh":      false,
 	}
 	for _, d := range downloaders {
@@ -622,7 +623,7 @@ func TestFullDownloaderInventory(t *testing.T) {
 		"yt": true, "ig": true, "tt": true, "fb": true, "pin": true, "sc": true, "tw": true,
 		"threads": true, "gh": true, "vidsplay": true, "odysee": true,
 		"istock": true, "alamy": true, "capcut": true, "imdb": true,
-		"spotify": true,
+		"spotify": true, "likee": true,
 	}
 	for _, d := range downloaders {
 		if !want[d.id] {
@@ -633,8 +634,8 @@ func TestFullDownloaderInventory(t *testing.T) {
 	for id := range want {
 		t.Errorf("downloader %q is missing", id)
 	}
-	if len(downloaders) != 16 {
-		t.Errorf("expected 16 downloaders, got %d", len(downloaders))
+	if len(downloaders) != 17 {
+		t.Errorf("expected 17 downloaders, got %d", len(downloaders))
 	}
 }
 

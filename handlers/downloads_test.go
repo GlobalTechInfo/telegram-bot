@@ -516,6 +516,69 @@ func TestSpotifySendsTrackNotCover(t *testing.T) {
 	}
 }
 
+// Likee names its two copies of the same video differently and puts a poster
+// beside them. The watermark-free copy must be what goes out.
+func TestLikeeSendsWatermarkFreeVideo(t *testing.T) {
+	api := &stubAPI{responders: map[string][]string{
+		"getMe":       {okMe},
+		"sendVideo":   {`{"ok":true,"result":{}}`},
+		"sendMessage": {`{"ok":true,"result":{}}`},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".mp4") {
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Write([]byte{0, 0, 0, 0x18, 'f', 't', 'y', 'p'})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"title":            "Trendy Video of the Week!",
+				"thumbnail":        srvHost(r) + "/poster.jpg",
+				"withoutwatermark": srvHost(r) + "/clean.mp4?crc=1&type=5",
+				"withWatermark":    srvHost(r) + "/wm.mp4?crc=1&type=5",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	h := igHandler(t, api, srv.URL)
+	d, _ := dlByID("likee")
+	h.resolveDownload(d, -1001, -1001, "https://l.likee.video/v/DnCl4V.html", "", "en")
+
+	if n := len(api.callsFor("sendVideo")); n != 1 {
+		t.Errorf("want one video sent, got %d sendVideo calls", n)
+	}
+	if n := len(api.callsFor("sendPhoto")); n != 0 {
+		t.Errorf("the poster must never be sent, got %d photos", n)
+	}
+}
+
+// The endpoint refuses the bare domain, so those links must be reported as
+// unsupported rather than sent to fail there.
+func TestLikeeRejectsUnsupportedLinkShapes(t *testing.T) {
+	for _, bad := range []string{
+		"https://likee.video/v/DnCl4V",
+		"https://www.likee.video/v/DnCl4V.html",
+		"https://l.likee.video/@user/video/123",
+		"https://l.likee.video/community",
+	} {
+		if hit := dlByHost(bad); !hit.offPath || hit.d.id != "likee" {
+			t.Errorf("%s should be offPath for likee, got ok=%v id=%q", bad, hit.ok, hit.d.id)
+		}
+	}
+	for _, good := range []string{
+		"https://l.likee.video/v/DnCl4V.html",
+		"https://l.likee.video/v/DnCl4V",
+		"https://l.likee.video/v/DnCl4V?share_id=1",
+	} {
+		if hit := dlByHost(good); !hit.ok {
+			t.Errorf("%s should be accepted, got %+v", good, hit)
+		}
+	}
+}
+
 // Facebook keeps its image-as-document quirk and its info block.
 func TestFacebookKeepsInfoBlockAndDocumentDelivery(t *testing.T) {
 	api := &stubAPI{responders: map[string][]string{
